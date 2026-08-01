@@ -1,0 +1,29 @@
+name: Daily Staggered Commit Scheduler
+
+on:
+  schedule:
+    - cron: '0 12 * * *' # Triggers daily at 12:00 UTC
+  workflow_dispatch:
+
+jobs:
+  staggered-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Execute Daily Staggered Commit & Push
+        run: |
+          python scripts/daily_pusher.py
