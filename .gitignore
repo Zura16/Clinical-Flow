@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+delta_lakehouse/
+.DS_Store
+*.log
+sample-data/fhir_r4/
+sample-data/sql_ehr/
+sample-data/claims_csv/
+.git_schedule_state.json
+
