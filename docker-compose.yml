@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: clinicalflow_sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=ClinicalFlow2026SecurePass!
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - ./sql/source:/docker-entrypoint-initdb.d
+    restart: always
+
+  pyspark_runner:
+    image: bitnami/spark:3.4.1
+    container_name: clinicalflow_pyspark
+    environment:
+      - SPARK_MODE=master
+    volumes:
+      - .:/opt/bitnami/spark/work
+    ports:
+      - "8080:8080"
+      - "7077:7077"
