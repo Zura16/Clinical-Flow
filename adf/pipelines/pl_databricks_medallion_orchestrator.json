@@ -1,0 +1,55 @@
+{
+  "name": "pl_databricks_medallion_orchestrator",
+  "properties": {
+    "description": "Orchestrates end-to-end Medallion Architecture execution: Bronze -> Silver -> Gold Star Schema -> DW Sync.",
+    "activities": [
+      {
+        "name": "Bronze_Ingestion_Task",
+        "type": "ExecutePipeline",
+        "typeProperties": {
+          "pipeline": { "referenceName": "pl_metadata_driven_ingestion", "type": "PipelineReference" },
+          "waitOnCompletion": true
+        }
+      },
+      {
+        "name": "Silver_Processing_FHIR",
+        "type": "DatabricksNotebook",
+        "dependsOn": [ { "activity": "Bronze_Ingestion_Task", "dependencyConditions": ["Succeeded"] } ],
+        "typeProperties": {
+          "notebookPath": "/ClinicalFlow/databricks/silver/process_fhir_silver"
+        },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" }
+      },
+      {
+        "name": "Silver_Processing_Relational",
+        "type": "DatabricksNotebook",
+        "dependsOn": [ { "activity": "Bronze_Ingestion_Task", "dependencyConditions": ["Succeeded"] } ],
+        "typeProperties": {
+          "notebookPath": "/ClinicalFlow/databricks/silver/process_relational_silver"
+        },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" }
+      },
+      {
+        "name": "Gold_Dimensions_Build",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          { "activity": "Silver_Processing_FHIR", "dependencyConditions": ["Succeeded"] },
+          { "activity": "Silver_Processing_Relational", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "notebookPath": "/ClinicalFlow/databricks/gold/build_dimensions"
+        },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" }
+      },
+      {
+        "name": "Gold_Facts_Build",
+        "type": "DatabricksNotebook",
+        "dependsOn": [ { "activity": "Gold_Dimensions_Build", "dependencyConditions": ["Succeeded"] } ],
+        "typeProperties": {
+          "notebookPath": "/ClinicalFlow/databricks/gold/build_facts"
+        },
+        "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" }
+      }
+    ]
+  }
+}
