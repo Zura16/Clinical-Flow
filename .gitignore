@@ -8,5 +8,4 @@ delta_lakehouse/
 sample-data/fhir_r4/
 sample-data/sql_ehr/
 sample-data/claims_csv/
-.git_schedule_state.json
 
