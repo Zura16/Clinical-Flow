@@ -95,10 +95,7 @@ class DataQualityEngine:
                 )
                 
                 # Write to quarantine Delta table
-                try:
-                    quarantine_df.write.format("delta").mode("append").save(QUARANTINE_TABLE_PATH)
-                except Exception:
-                    quarantine_df.write.format("parquet").mode("append").save(QUARANTINE_TABLE_PATH)
+                quarantine_df.write.format("delta").mode("append").save(QUARANTINE_TABLE_PATH)
                 
                 # Keep only valid rows
                 valid_df = valid_df.filter(expr_str)

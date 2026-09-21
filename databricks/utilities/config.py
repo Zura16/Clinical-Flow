@@ -5,6 +5,7 @@ Defines paths, Spark session instantiation, helper functions, and Delta Lake set
 
 import os
 import hashlib
+from delta import configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, TimestampType, StructType, StructField, DoubleType, LongType, IntegerType, DateType, BooleanType
@@ -24,16 +25,22 @@ os.makedirs(GOLD_PATH, exist_ok=True)
 os.makedirs(META_PATH, exist_ok=True)
 
 def get_spark_session(app_name="ClinicalFlow_Lakehouse"):
-    """Instantiates a PySpark Session"""
-    return (
+    """Instantiates a local PySpark session with Delta Lake enabled.
+
+    configure_spark_with_delta_pip adds the delta-spark jar matching the installed pip package,
+    so the JVM side and Python side can't drift apart.
+    """
+    builder = (
         SparkSession.builder
         .appName(app_name)
         .master("local[2]")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.driver.memory", "1g")
-        .getOrCreate()
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     )
+    return configure_spark_with_delta_pip(builder).getOrCreate()
 
 # Hashing helper function for record deduplication and idempotency
 def add_record_hash(df, columns_to_hash, output_col="record_hash"):
@@ -42,18 +49,12 @@ def add_record_hash(df, columns_to_hash, output_col="record_hash"):
     return df.withColumn(output_col, F.sha2(F.concat_ws("||", *cols), 256))
 
 def save_df(df, path, mode="overwrite"):
-    """Saves DataFrame using Delta Lake format with Parquet fallback for offline environments"""
-    try:
-        df.write.format("delta").mode(mode).option("overwriteSchema", "true").save(path)
-    except Exception:
-        df.write.format("parquet").mode(mode).save(path)
+    """Saves a DataFrame as a Delta table. Errors propagate; there is no format fallback."""
+    df.write.format("delta").mode(mode).option("overwriteSchema", "true").save(path)
 
 def read_df(spark, path):
-    """Reads DataFrame using Delta Lake format with Parquet fallback for offline environments"""
-    try:
-        return spark.read.format("delta").load(path)
-    except Exception:
-        return spark.read.format("parquet").load(path)
+    """Reads a Delta table. Errors propagate; there is no format fallback."""
+    return spark.read.format("delta").load(path)
 
 # PHI Masking helper functions
 def mask_ssn(ssn_col):

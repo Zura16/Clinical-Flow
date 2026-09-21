@@ -64,10 +64,6 @@ class PipelineLogger:
         
         audit_df = self.spark.createDataFrame(audit_data, AUDIT_SCHEMA)
         
-        # Append to Delta Lake audit path or Parquet if Delta format extension active
-        try:
-            audit_df.write.format("delta").mode("append").save(AUDIT_TABLE_PATH)
-        except Exception:
-            audit_df.write.format("parquet").mode("append").save(AUDIT_TABLE_PATH)
+        audit_df.write.format("delta").mode("append").save(AUDIT_TABLE_PATH)
             
         print(f"[AUDIT LOG] {self.pipeline_name} ({self.layer}) - Status: {status} | Read: {rows_read} | Inserted: {rows_inserted} | Rejected: {rows_rejected}")
