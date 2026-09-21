@@ -15,30 +15,47 @@ CREATE TABLE dbo.pipeline_config (
     source_table            VARCHAR(100) NOT NULL,
     destination_table       VARCHAR(100) NOT NULL,
     ingestion_type          VARCHAR(30) NOT NULL, -- Full, Watermark, CDC
-    watermark_column        VARCHAR(100) NULL,
+    watermark_column        VARCHAR(100) NULL,    -- required unless ingestion_type = 'Full'
     primary_key_columns     VARCHAR(500) NOT NULL,
+    source_location         VARCHAR(500) NOT NULL, -- file path/glob or connection-relative object name
     load_frequency          VARCHAR(30) DEFAULT 'Daily',
     active_flag             BIT DEFAULT 1,
     data_quality_threshold  DECIMAL(5,2) DEFAULT 95.00,
     created_at              DATETIME2 DEFAULT GETUTCDATE(),
-    updated_at              DATETIME2 DEFAULT GETUTCDATE()
+    updated_at              DATETIME2 DEFAULT GETUTCDATE(),
+    CONSTRAINT uq_pipeline_config_source UNIQUE (source_name, source_table)
 );
 
--- Seed metadata rules for active sources
-INSERT INTO dbo.pipeline_config (source_name, source_table, destination_table, ingestion_type, watermark_column, primary_key_columns, active_flag, data_quality_threshold)
+-- Seed metadata for active sources. Mirrors PIPELINE_CONFIG_SEED in databricks/utilities/control.py.
+-- sql_ehr rows use Watermark over CSV extracts until SQL Server CDC lands (fix plan step 2).
+INSERT INTO dbo.pipeline_config (source_name, source_table, destination_table, ingestion_type, watermark_column, primary_key_columns, source_location, active_flag, data_quality_threshold)
 VALUES
-('sql_ehr', 'patients', 'bronze_ehr_patients', 'CDC', 'updated_at', 'patient_id', 1, 98.00),
-('sql_ehr', 'encounters', 'bronze_ehr_encounters', 'CDC', 'updated_at', 'encounter_id', 1, 98.00),
-('sql_ehr', 'providers', 'bronze_ehr_providers', 'Watermark', 'updated_at', 'provider_id', 1, 99.00),
-('sql_ehr', 'diagnoses', 'bronze_ehr_diagnoses', 'CDC', 'updated_at', 'diagnosis_id', 1, 95.00),
-('sql_ehr', 'lab_results', 'bronze_ehr_lab_results', 'CDC', 'updated_at', 'lab_result_id', 1, 95.00),
-('sql_ehr', 'medications', 'bronze_ehr_medications', 'CDC', 'updated_at', 'medication_order_id', 1, 95.00),
-('fhir_r4', 'Observation', 'bronze_fhir_observation', 'Watermark', 'meta_lastUpdated', 'id', 1, 95.00),
-('fhir_r4', 'Patient', 'bronze_fhir_patient', 'Watermark', 'meta_lastUpdated', 'id', 1, 98.00),
-('fhir_r4', 'Condition', 'bronze_fhir_condition', 'Watermark', 'meta_lastUpdated', 'id', 1, 95.00),
-('fhir_r4', 'MedicationRequest', 'bronze_fhir_medication_request', 'Watermark', 'meta_lastUpdated', 'id', 1, 95.00),
-('claims_csv', 'insurance_claims.csv', 'bronze_claims', 'Full', NULL, 'claim_id', 1, 95.00),
-('claims_csv', 'facility_info.csv', 'bronze_facilities', 'Full', NULL, 'facility_id', 1, 99.00);
+('sql_ehr', 'patients', 'bronze_ehr_patients', 'Watermark', 'updated_at', 'patient_id', 'sample-data/sql_ehr/patients.csv', 1, 98.00),
+('sql_ehr', 'encounters', 'bronze_ehr_encounters', 'Watermark', 'updated_at', 'encounter_id', 'sample-data/sql_ehr/encounters.csv', 1, 98.00),
+('sql_ehr', 'providers', 'bronze_ehr_providers', 'Watermark', 'updated_at', 'provider_id', 'sample-data/sql_ehr/providers.csv', 1, 99.00),
+('sql_ehr', 'diagnoses', 'bronze_ehr_diagnoses', 'Watermark', 'updated_at', 'diagnosis_id', 'sample-data/sql_ehr/diagnoses.csv', 1, 95.00),
+('sql_ehr', 'lab_results', 'bronze_ehr_lab_results', 'Watermark', 'updated_at', 'lab_result_id', 'sample-data/sql_ehr/lab_results.csv', 1, 95.00),
+('sql_ehr', 'medications', 'bronze_ehr_medications', 'Watermark', 'updated_at', 'medication_order_id', 'sample-data/sql_ehr/medications.csv', 1, 95.00),
+('fhir_r4', 'Patient', 'bronze_fhir_patient', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 98.00),
+('fhir_r4', 'Encounter', 'bronze_fhir_encounter', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 95.00),
+('fhir_r4', 'Observation', 'bronze_fhir_observation', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 95.00),
+('fhir_r4', 'Condition', 'bronze_fhir_condition', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 95.00),
+('fhir_r4', 'MedicationRequest', 'bronze_fhir_medication_request', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 95.00),
+('fhir_r4', 'Practitioner', 'bronze_fhir_practitioner', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 99.00),
+('claims_csv', 'insurance_claims.csv', 'bronze_claims', 'Full', NULL, 'claim_id', 'sample-data/claims_csv/insurance_claims.csv', 1, 95.00),
+('claims_csv', 'facility_info.csv', 'bronze_facilities', 'Full', NULL, 'facility_id', 'sample-data/claims_csv/facility_info.csv', 1, 99.00);
+
+-- 1b. Watermark State (how far each Watermark/CDC table has been ingested).
+-- Kept separate from pipeline_config so config edits and run progress never overwrite each other.
+-- Advanced only after the bronze write for that run has committed; never moved backwards.
+CREATE TABLE dbo.watermark_state (
+    source_name             VARCHAR(100) NOT NULL,
+    source_table            VARCHAR(100) NOT NULL,
+    watermark_value         VARCHAR(100) NOT NULL,
+    last_pipeline_run_id    VARCHAR(100) NOT NULL,
+    updated_at              DATETIME2 DEFAULT GETUTCDATE(),
+    CONSTRAINT pk_watermark_state PRIMARY KEY (source_name, source_table)
+);
 
 -- 2. Data Quality Rules Table
 CREATE TABLE dbo.data_quality_rule (
