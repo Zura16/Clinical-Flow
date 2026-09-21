@@ -42,6 +42,7 @@ def get_spark_session(app_name="ClinicalFlow_Lakehouse"):
         # Timestamps are stored and compared in UTC; without this, Spark renders them in the
         # machine's local zone and watermarks shift by the UTC offset.
         .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.ui.showConsoleProgress", "false")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     )
