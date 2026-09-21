@@ -1,28 +1,44 @@
 {
   "name": "pl_metadata_driven_ingestion",
   "properties": {
-    "description": "Dynamic metadata-driven ingestion pipeline reading control table pipeline_config and looping across active sources.",
+    "description": "Metadata-driven bronze ingestion: Lookup reads active pipeline_config rows, ForEach runs the bronze job per table. Passing the ADF RunId as run_id makes ADF retries safe: tables the run already landed are skipped, failed ones resume from the current watermark.",
     "activities": [
       {
         "name": "LookupActivePipelineConfig",
         "type": "Lookup",
         "dependsOn": [],
-        "policy": { "timeout": "0.00:10:00", "retry": 3 },
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 3
+        },
         "typeProperties": {
           "source": {
             "type": "AzureSqlSource",
-            "sqlReaderQuery": "SELECT source_name, source_table, destination_table, ingestion_type, watermark_column, primary_key_columns FROM dbo.pipeline_config WHERE active_flag = 1"
+            "sqlReaderQuery": "SELECT source_name, source_table, destination_table, ingestion_type, watermark_column, primary_key_columns, source_location FROM dbo.pipeline_config WHERE active_flag = 1"
           },
-          "dataset": { "referenceName": "ds_sql_server_source", "type": "DatasetReference" },
+          "dataset": {
+            "referenceName": "ds_sql_server_source",
+            "type": "DatasetReference"
+          },
           "firstRowOnly": false
         }
       },
       {
         "name": "ForEachSourceTable",
         "type": "ForEach",
-        "dependsOn": [ { "activity": "LookupActivePipelineConfig", "dependencyConditions": ["Succeeded"] } ],
+        "dependsOn": [
+          {
+            "activity": "LookupActivePipelineConfig",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
         "typeProperties": {
-          "items": { "value": "@activity('LookupActivePipelineConfig').output.value", "type": "Expression" },
+          "items": {
+            "value": "@activity('LookupActivePipelineConfig').output.value",
+            "type": "Expression"
+          },
           "activities": [
             {
               "name": "ExecuteDatabricksBronzeIngestion",
@@ -31,13 +47,29 @@
               "typeProperties": {
                 "notebookPath": "/ClinicalFlow/databricks/bronze/ingest_raw_data",
                 "baseParameters": {
-                  "SourceName": { "value": "@item().source_name", "type": "Expression" },
-                  "SourceTable": { "value": "@item().source_table", "type": "Expression" },
-                  "DestinationTable": { "value": "@item().destination_table", "type": "Expression" },
-                  "IngestionType": { "value": "@item().ingestion_type", "type": "Expression" }
+                  "source": {
+                    "value": "@item().source_name",
+                    "type": "Expression"
+                  },
+                  "table": {
+                    "value": "@item().source_table",
+                    "type": "Expression"
+                  },
+                  "run_id": {
+                    "value": "@pipeline().RunId",
+                    "type": "Expression"
+                  }
                 }
               },
-              "linkedServiceName": { "referenceName": "ls_azure_databricks", "type": "LinkedServiceReference" }
+              "linkedServiceName": {
+                "referenceName": "ls_azure_databricks",
+                "type": "LinkedServiceReference"
+              },
+              "policy": {
+                "timeout": "0.02:00:00",
+                "retry": 2,
+                "retryIntervalInSeconds": 120
+              }
             }
           ]
         }
