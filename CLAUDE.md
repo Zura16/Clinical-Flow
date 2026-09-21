@@ -71,13 +71,16 @@ Cross-cutting: pipeline_config (metadata) · data_quality_rule + quarantine · p
 | Stack (venv) | Python 3.12 · PySpark 4.1.1 · delta-spark 4.3.1 · Java 17 |
 | Current data volume | 1,000 patients · ~5K lab results (target: 100K–1M records) |
 | Control tables (DDL) | `pipeline_config`, `data_quality_rule`, `quarantine_records`, `pipeline_run_audit` — `sql/quality/01_data_quality_framework.sql` |
-| Canonical counts | _TBD — set once the incremental pipeline lands_ |
+| Canonical counts (current generator seed) | bronze first load: ehr patients 1,000 · encounters/diagnoses/medications 1,993 · lab_results 5,021 · providers 50 · fhir Observation 6,325 · Encounter/Condition 1,265 · Patient 500 · MedicationRequest/Practitioner **0** (generator doesn't emit them) · claims 1,500 · facilities 5. Silver: 1,000 / 1,993 / 6,325 / 500 / 1,500. **Second bronze run: 0 rows on all 12 watermark tables.** |
+| Control / metadata tables | `metadata/{pipeline_config (14 rows), watermark_state, pipeline_run_audit, quarantine_records}` |
+| Bronze layout | `bronze/<destination_table>`, partitioned `_ingest_date`/`_pipeline_run_id`; audit statuses `SUCCESS`/`FAILED`/`SKIPPED` |
 
 ## Common commands (repo root)
 
 ```bash
 venv/bin/python sample-data/generate_clinical_data.py          # regenerate synthetic sources
-venv/bin/python -m databricks.bronze.ingest_raw_data            # bronze
+venv/bin/python -m databricks.bronze.ingest_raw_data            # bronze (all active pipeline_config rows)
+venv/bin/python -m databricks.bronze.ingest_raw_data --run-id <id> [--source S --table T]  # restart a run: landed tables skipped, failed ones retried
 venv/bin/python -m databricks.silver.process_fhir_silver        # silver (FHIR)
 venv/bin/python -m databricks.silver.process_relational_silver  # silver (EHR + claims)
 venv/bin/python -m databricks.gold.build_dimensions             # gold dims
@@ -91,7 +94,7 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 - [x] **1. Foundations** — remove commit-automation bot; real Delta (no Parquet fallback); secrets out of compose
 - [ ] **2. Real sources** — SQL Server + CDC in Docker, loaded from the generator (or Synthea); scale to 100K+
-- [ ] **3. Bronze** — append-only, partitioned, driven by `pipeline_config`, per-source watermarks
+- [x] **3. Bronze** — append-only, partitioned, driven by `pipeline_config`, per-source watermarks
 - [ ] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
 - [ ] **5. Data quality** — rules from `data_quality_rule`, missing rule types, thresholds that fail the run, idempotent quarantine
 - [ ] **6. Gold** — stable SKs, unknown members, point-in-time SCD2 fact joins, missing dims/facts, no fabricated metrics
@@ -102,5 +105,6 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** step 1 (Foundations) ✅ 2026-09-21 — commit bot removed, Delta verified on all 21 tables, secrets out of compose/Terraform. **Next: step 2 (real sources)** — needs Docker installed first; step 3 (bronze) can start without it.
-- **Known issues:** every layer full-overwrites (no incremental logic); `save_df` still sets `overwriteSchema=true`; SQL Server never read; DQ rules hard-coded; SCD2 SKs unstable and facts join current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; tests assert little; README overclaims. Docker not installed. Old SA password `ClinicalFlow2026SecurePass!` is in git history (and pushed to origin by the old bot) — treat as burned, never reuse. Tests write to the real `delta_lakehouse/` (move to temp path in step 8).
+- **Phase:** steps 1 ✅ and 3 ✅ (2026-09-21). **Next: step 2 (SQL Server + CDC)** once Docker is installed; otherwise step 4 (silver MERGE). Bronze is append-only, config-driven, watermarked and restartable.
+- **Bronze restart semantics (don't regress):** a succeeded run ID is SKIPPED and never re-extracted, because its partition is the only copy of past source versions. A failed run ID is retried from the current watermark. Commit order: write → SUCCESS audit → watermark. See decisions.md, "replay destroyed bronze history".
+- **Known issues:** silver/gold still full-overwrite (`save_df` with `overwriteSchema=true`); DQ rules hard-coded; quarantine appends duplicate on rerun; SCD2 SKs unstable and facts join the current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; old tests assert little; `dim_facility` never built (no `silver_facilities`). The generator emits no MedicationRequest/Practitioner. Watermark `>` can miss same-timestamp late rows (fixed by CDC). Test suite takes ~6.5 min. Docker not installed. Old SA password is in git history and was pushed by the old bot: treat it as burned.

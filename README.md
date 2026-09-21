@@ -10,31 +10,30 @@ Engineered around **Medallion Architecture (Bronze -> Silver -> Gold)**, Delta L
 
 ## 🌟 Key Engineering Features & Highlights
 
+> **Status:** under active rebuild. Items marked *(planned)* are designed but not implemented yet; the ordered plan lives in [CLAUDE.md](CLAUDE.md#fix-plan-gap-analysis-of-2026-09-21).
+
 1. **Metadata-Driven Ingestion Engine**:
-   - Central control table (`pipeline_config`) dynamically drives ADF and PySpark extraction behavior without hardcoded individual pipelines.
-   - Configurable watermark and Change Data Capture (CDC) processing.
+   - Central control table (`pipeline_config`) drives bronze ingestion: adding a source is a new row, not new code. Operators can disable a table with `active_flag`.
+   - Per-table watermarks in `watermark_state`, advanced only after the bronze write and its audit row commit. SQL Server CDC *(planned — fix plan step 2)*.
 
 2. **Healthcare Data Normalization & PII Masking**:
-   - Flattens nested FHIR R4 JSON resources (`Patient`, `Encounter`, `Observation`, `Condition`, `MedicationRequest`).
-   - Normalizes clinical coding standards (LOINC, ICD-10-CM, RxNorm).
-   - Protects sensitive health information (PHI/PII) using SHA-256 hashing.
+   - Bronze lands every FHIR R4 resource as its original JSON text (no schema inference). Silver flattens `Patient` and `Observation` with explicit schemas; `Encounter`, `Condition`, `MedicationRequest`, `Practitioner` *(planned)*.
+   - SSN hashing helper exists; end-to-end PHI masking demonstration *(planned)*.
 
 3. **Data Quality Framework & Quarantine Isolation**:
-   - Configurable rules table (`data_quality_rule`) evaluating constraints (NOT NULL, RANGE, REGEX).
-   - Bad records (e.g. malformed lab values) are isolated in `quarantine_records` with raw JSON payload and error context—never silently dropped.
+   - NOT NULL and RANGE rules route failing rows to `quarantine_records` with the raw payload and error context instead of dropping them. Rules currently live in code; loading them from `data_quality_rule`, more rule types, and run-failing thresholds *(planned — step 5)*.
 
-4. **100% Idempotency & Record Hashing**:
-   - SHA-256 record hashes generated for all incoming records.
-   - MERGE-based upserts guarantee that rerunning pipelines produces identical final outputs with **zero row duplication**.
+4. **Idempotency & Restartability**:
+   - Bronze is append-only, partitioned by `_ingest_date` / `_pipeline_run_id`. Rerunning a run ID skips tables it already landed; a failed run ID resumes from the current watermark. Proven by `tests/integration/test_bronze_incremental.py`.
+   - Silver and gold still rebuild in full each run; key-based Delta `MERGE` *(planned — step 4)*.
 
 5. **Star Schema Data Warehouse & SCD Type 2**:
-   - **Dimensions**: `dim_patient` (SCD Type 2 historical change tracking), `dim_provider`, `dim_facility`, `dim_diagnosis`, `dim_medication`, `dim_date`, `dim_department`.
-   - **Facts**: `fact_encounter`, `fact_observation`, `fact_medication_order`, `fact_diagnosis`, `fact_claim`.
-   - Handles late-arriving dimensions gracefully using surrogate key `-1` ("UNKNOWN").
+   - Built today: `dim_patient` (SCD Type 2), `dim_date`, `fact_encounter`, `fact_observation`, `fact_claim`.
+   - Stable surrogate keys, point-in-time fact joins, unknown-member rows, and `dim_provider`, `dim_facility`, `dim_diagnosis`, `dim_medication`, `dim_department`, `fact_medication_order`, `fact_diagnosis` *(planned — step 6)*.
 
 6. **Controlled Failure Recovery & Observability**:
-   - Detailed pipeline run metrics logged to `pipeline_run_audit`.
-   - Complete failure simulation script (`failure_simulation.py`) demonstrating malformed data injection, quarantine capture, rule fix, partition replay, and idempotency verification.
+   - Every bronze table attempt writes a `SUCCESS`, `FAILED` or `SKIPPED` row to `pipeline_run_audit` with row counts and watermark window.
+   - Failure-and-recovery demonstration that injects a real failure and replays only the failed partition *(planned — step 7)*.
 
 ---
 
@@ -114,21 +113,21 @@ python sample-data/generate_clinical_data.py
 ### 2. Run End-to-End Medallion Pipeline
 Ingest raw data into Bronze, clean/validate into Silver, and build Gold dimensions & facts:
 ```bash
-python databricks/bronze/ingest_raw_data.py
-python databricks/silver/process_fhir_silver.py
-python databricks/silver/process_relational_silver.py
-python databricks/gold/build_dimensions.py
-python databricks/gold/build_facts.py
+python -m databricks.bronze.ingest_raw_data
+python -m databricks.silver.process_fhir_silver
+python -m databricks.silver.process_relational_silver
+python -m databricks.gold.build_dimensions
+python -m databricks.gold.build_facts
 ```
 
 ### 3. Run Controlled Failure & Recovery Demonstration
-Demonstrate system resilience under bad data injection, quarantine isolation, rule correction, and idempotent partition replay:
+Current demo: quarantines injected bad lab values and reruns the pipeline (being rebuilt in step 7):
 ```bash
-python databricks/utilities/failure_simulation.py
+python -m databricks.utilities.failure_simulation
 ```
 
 ### 4. Run PyTest Unit & Integration Test Suite
-Execute comprehensive test coverage for FHIR parsing, Data Quality Engine, SCD Type 2 logic, idempotency, and reconciliation:
+Unit and integration tests (they run against a temporary lakehouse, never `delta_lakehouse/`):
 ```bash
 python -m pytest tests/ -v
 ```
