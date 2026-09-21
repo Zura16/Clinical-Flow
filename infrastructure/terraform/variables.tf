@@ -19,8 +19,9 @@ variable "admin_username" {
 }
 
 variable "admin_password" {
-  default   = "ClinicalFlow2026SecurePass!"
-  sensitive = true
+  description = "SQL admin password. No default: supply via TF_VAR_admin_password or a gitignored *.tfvars file."
+  type        = string
+  sensitive   = true
 }
 
 variable "adf_name" {

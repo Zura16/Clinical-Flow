@@ -10,3 +10,6 @@ sample-data/sql_ehr/
 sample-data/claims_csv/
 
 .env
+*.tfvars
+.terraform/
+*.tfstate*
