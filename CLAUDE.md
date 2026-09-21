@@ -89,7 +89,7 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 ## Fix plan (gap analysis of 2026-09-21)
 
-- [ ] **1. Foundations** — remove commit-automation bot; real Delta (no Parquet fallback); secrets out of compose
+- [x] **1. Foundations** — remove commit-automation bot; real Delta (no Parquet fallback); secrets out of compose
 - [ ] **2. Real sources** — SQL Server + CDC in Docker, loaded from the generator (or Synthea); scale to 100K+
 - [ ] **3. Bronze** — append-only, partitioned, driven by `pipeline_config`, per-source watermarks
 - [ ] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
@@ -102,5 +102,5 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** fix plan step 1 (Foundations) in progress.
-- **Known issues:** every layer full-overwrites (no incremental logic); Delta silently falls back to Parquet; SQL Server never read; DQ rules hard-coded; SCD2 SKs unstable and facts join current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; tests assert little; README overclaims. Docker not installed.
+- **Phase:** step 1 (Foundations) ✅ 2026-09-21 — commit bot removed, Delta verified on all 21 tables, secrets out of compose/Terraform. **Next: step 2 (real sources)** — needs Docker installed first; step 3 (bronze) can start without it.
+- **Known issues:** every layer full-overwrites (no incremental logic); `save_df` still sets `overwriteSchema=true`; SQL Server never read; DQ rules hard-coded; SCD2 SKs unstable and facts join current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; tests assert little; README overclaims. Docker not installed. Old SA password `ClinicalFlow2026SecurePass!` is in git history (and pushed to origin by the old bot) — treat as burned, never reuse. Tests write to the real `delta_lakehouse/` (move to temp path in step 8).
