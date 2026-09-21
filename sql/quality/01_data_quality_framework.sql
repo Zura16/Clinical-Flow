@@ -110,7 +110,7 @@ CREATE TABLE dbo.pipeline_run_audit (
     rows_rejected        BIGINT DEFAULT 0,
     watermark_start      VARCHAR(100) NULL,
     watermark_end        VARCHAR(100) NULL,
-    execution_status     VARCHAR(30) NOT NULL, -- RUNNING, SUCCESS, FAILED
+    execution_status     VARCHAR(30) NOT NULL, -- RUNNING, SUCCESS, FAILED, SKIPPED (run ID already landed)
     error_code           VARCHAR(50) NULL,
     error_message        VARCHAR(2000) NULL,
     created_at           DATETIME2 DEFAULT GETUTCDATE()

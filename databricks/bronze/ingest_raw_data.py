@@ -5,10 +5,18 @@ For every active row in pipeline_config: read the source, keep only rows past th
 watermark (Watermark loads) or the whole source (Full loads), and append them to an immutable
 bronze Delta table partitioned by _ingest_date / _pipeline_run_id.
 
-Idempotency: a run writes with replaceWhere on its own _pipeline_run_id, so rerunning the same
-run ID replaces exactly what that run wrote and nothing else. A replay reuses the watermark window
-the original run recorded in pipeline_run_audit, so it lands the same rows even after later runs
-have moved the watermark on.
+Idempotency and restarts, per table:
+- A run ID that already succeeded is skipped (audit status SKIPPED). Its bronze partition is the
+  only copy of the source rows as they were then; the source may have changed since, so
+  re-extracting would replace history with a different set of rows.
+- A run ID that failed is retried as a normal incremental run from the current watermark. Failed
+  runs never advance the watermark, so the retry picks up exactly what the failed attempt missed.
+- Writes use replaceWhere on the run's own _pipeline_run_id, so a retry after a crash between the
+  bronze commit and the audit row replaces that partial partition instead of duplicating it.
+- Commit order is bronze write -> SUCCESS audit row -> watermark advance. If the process dies
+  before the watermark moves, the next attempt at that run ID sees SUCCESS and repairs the watermark.
+
+Reprocessing downstream ("replay the failed partition") reads from bronze, never from the source.
 
 Usage:
     python -m databricks.bronze.ingest_raw_data [--run-id ID] [--source NAME] [--table NAME]
@@ -92,15 +100,11 @@ def watermark_ts(watermark_column: str):
     return F.try_to_timestamp(F.col(watermark_column))
 
 
-def select_increment(df: DataFrame, watermark_column: str, start: str | None, end: str | None) -> DataFrame:
-    """Rows with start < watermark <= end. A None bound is open."""
-    ts = watermark_ts(watermark_column)
-    condition = F.lit(True)
-    if start is not None:
-        condition = condition & (ts > F.to_timestamp(F.lit(start)))
-    if end is not None:
-        condition = condition & (ts <= F.to_timestamp(F.lit(end)))
-    return df.filter(condition)
+def select_increment(df: DataFrame, watermark_column: str, start: str | None) -> DataFrame:
+    """Rows strictly past the stored watermark; everything on a first load (start is None)."""
+    if start is None:
+        return df
+    return df.filter(watermark_ts(watermark_column) > F.to_timestamp(F.lit(start)))
 
 
 def count_bad_watermarks(df: DataFrame, watermark_column: str) -> int:
@@ -124,26 +128,23 @@ def add_bronze_metadata(df: DataFrame, run_id: str, cfg: SourceConfig) -> DataFr
 
 
 # ---------------------------------------------------------------------------
-# Replay support
+# Restart support
 # ---------------------------------------------------------------------------
 
-def find_replay_window(spark: SparkSession, run_id: str, pipeline_name: str) -> tuple[str | None, str | None] | None:
-    """If this run ID has already run this table, return the (start, end) watermark window it
-    used; otherwise None. The original attempt's start is authoritative; end comes from the
-    latest successful attempt, or is open if every attempt failed."""
+def find_successful_attempt(spark: SparkSession, run_id: str, pipeline_name: str):
+    """The audit row of this run ID's successful attempt at this table, or None."""
     if not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
         return None
-    attempts = (
+    return (
         spark.read.format("delta").load(AUDIT_TABLE_PATH)
-        .filter((F.col("pipeline_run_id") == run_id) & (F.col("pipeline_name") == pipeline_name))
-        .orderBy("start_timestamp")
-        .collect()
+        .filter(
+            (F.col("pipeline_run_id") == run_id)
+            & (F.col("pipeline_name") == pipeline_name)
+            & (F.col("execution_status") == "SUCCESS")
+        )
+        .orderBy(F.col("end_timestamp").desc())
+        .first()
     )
-    if not attempts:
-        return None
-    start = attempts[0]["watermark_start"]
-    successful_ends = [a["watermark_end"] for a in attempts if a["execution_status"] == "SUCCESS" and a["watermark_end"]]
-    return start, (max(successful_ends) if successful_ends else None)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +157,15 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
     target = os.path.join(BRONZE_PATH, cfg.destination_table)
     wm_start = None
     try:
+        previous = find_successful_attempt(spark, run_id, pipeline_name)
+        if previous is not None:
+            if previous["watermark_end"] is not None:
+                advance_watermark(spark, cfg, previous["watermark_end"], run_id)  # no-op unless a crash skipped it
+            logger.log_run(watermark_start=previous["watermark_start"], watermark_end=previous["watermark_end"],
+                           status="SKIPPED", error_message="run ID already landed this table; partition left untouched")
+            print(f"[BRONZE] {cfg.destination_table}: run {run_id} already landed {previous['rows_inserted']} rows; skipped")
+            return previous["rows_inserted"]
+
         source_df = read_source(spark, cfg)
 
         if cfg.ingestion_type == "Full":
@@ -164,17 +174,12 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
             bad = count_bad_watermarks(source_df, cfg.watermark_column)
             if bad:
                 raise ValueError(f"{bad} row(s) in {cfg.source_location} have a missing or unparseable {cfg.watermark_column}")
-            replay = find_replay_window(spark, run_id, pipeline_name)
-            if replay is not None:
-                wm_start, wm_bound = replay
-            else:
-                wm_start, wm_bound = get_watermark(spark, cfg), None
-            increment = select_increment(source_df, cfg.watermark_column, wm_start, wm_bound)
+            wm_start = get_watermark(spark, cfg)
+            increment = select_increment(source_df, cfg.watermark_column, wm_start)
 
         landed = add_bronze_metadata(increment, run_id, cfg).cache()
         rows = landed.count()
         if cfg.ingestion_type != "Full":
-            # An empty increment leaves the window where it was, so a replay of it is also empty.
             wm_end = max_watermark(landed, cfg.watermark_column) if rows else wm_start
 
         (
@@ -186,11 +191,10 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         )
         landed.unpersist()
 
-        # Only after the bronze commit succeeds does the watermark move.
+        logger.log_run(rows_read=rows, rows_inserted=rows, watermark_start=wm_start, watermark_end=wm_end, status="SUCCESS")
+        # The watermark moves last: only once the rows are committed and the run is recorded.
         if wm_end is not None:
             advance_watermark(spark, cfg, wm_end, run_id)
-
-        logger.log_run(rows_read=rows, rows_inserted=rows, watermark_start=wm_start, watermark_end=wm_end, status="SUCCESS")
         print(f"[BRONZE] {cfg.destination_table}: landed {rows} rows ({cfg.ingestion_type}, window {wm_start} -> {wm_end})")
         return rows
     except Exception as exc:
@@ -226,7 +230,7 @@ def run_bronze_ingestion(spark: SparkSession | None = None, run_id: str | None =
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-id", help="reuse an existing run ID to replay exactly what it ingested")
+    parser.add_argument("--run-id", help="reuse a run ID to restart it: tables it already landed are skipped, failed ones retried")
     parser.add_argument("--source", help="limit to one source_name")
     parser.add_argument("--table", help="limit to one source_table")
     args = parser.parse_args()
