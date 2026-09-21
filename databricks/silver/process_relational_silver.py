@@ -7,7 +7,8 @@ import os
 import uuid
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, DateType, TimestampType
-from databricks.utilities.config import BRONZE_PATH, SILVER_PATH, get_spark_session, add_record_hash, save_df, read_df
+from databricks.utilities.config import SILVER_PATH, get_spark_session, add_record_hash, save_df
+from databricks.silver.bronze_reader import bronze_exists, read_bronze_current
 from databricks.utilities.logger import PipelineLogger
 from databricks.utilities.quality_engine import DataQualityEngine
 
@@ -24,10 +25,9 @@ def process_relational_to_silver(spark=None, run_id=None):
     # ----------------------------------------------------
     # 1. Process EHR Patients
     # ----------------------------------------------------
-    ehr_pat_path = os.path.join(BRONZE_PATH, "ehr_patients")
-    if os.path.exists(ehr_pat_path):
+    if bronze_exists("bronze_ehr_patients"):
         logger = PipelineLogger(spark, run_id, "process_silver_ehr_patients", "sql_ehr", "SILVER")
-        df = read_df(spark, ehr_pat_path)
+        df = read_bronze_current(spark, "bronze_ehr_patients")
         
         clean_df = (
             df.select(
@@ -59,10 +59,9 @@ def process_relational_to_silver(spark=None, run_id=None):
     # ----------------------------------------------------
     # 2. Process EHR Encounters
     # ----------------------------------------------------
-    ehr_enc_path = os.path.join(BRONZE_PATH, "ehr_encounters")
-    if os.path.exists(ehr_enc_path):
+    if bronze_exists("bronze_ehr_encounters"):
         logger = PipelineLogger(spark, run_id, "process_silver_ehr_encounters", "sql_ehr", "SILVER")
-        df = read_df(spark, ehr_enc_path)
+        df = read_bronze_current(spark, "bronze_ehr_encounters")
         
         clean_df = (
             df.select(
@@ -91,10 +90,9 @@ def process_relational_to_silver(spark=None, run_id=None):
     # ----------------------------------------------------
     # 3. Process Claims CSV
     # ----------------------------------------------------
-    claims_path = os.path.join(BRONZE_PATH, "claims")
-    if os.path.exists(claims_path):
+    if bronze_exists("bronze_claims"):
         logger = PipelineLogger(spark, run_id, "process_silver_claims", "claims_csv", "SILVER")
-        df = read_df(spark, claims_path)
+        df = read_bronze_current(spark, "bronze_claims")
         
         clean_df = (
             df.select(

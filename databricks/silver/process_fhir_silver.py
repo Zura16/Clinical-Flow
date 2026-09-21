@@ -7,9 +7,29 @@ import os
 import uuid
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType
-from databricks.utilities.config import BRONZE_PATH, SILVER_PATH, get_spark_session, add_record_hash, save_df, read_df
+from databricks.utilities.config import SILVER_PATH, get_spark_session, add_record_hash, save_df
+from databricks.silver.bronze_reader import bronze_exists, read_bronze_current
 from databricks.utilities.logger import PipelineLogger
 from databricks.utilities.quality_engine import DataQualityEngine
+
+# Explicit FHIR R4 schemas for the fields silver uses. Fields not listed are ignored rather than
+# inferred, so a new or renamed field upstream can't silently change silver's column types.
+FHIR_PATIENT_SCHEMA = (
+    "id STRING, meta STRUCT<lastUpdated: STRING>, gender STRING, birthDate STRING, "
+    "name ARRAY<STRUCT<family: STRING, given: ARRAY<STRING>>>, "
+    "address ARRAY<STRUCT<line: ARRAY<STRING>, city: STRING, state: STRING, postalCode: STRING>>"
+)
+FHIR_OBSERVATION_SCHEMA = (
+    "id STRING, status STRING, effectiveDateTime STRING, "
+    "subject STRUCT<reference: STRING>, encounter STRUCT<reference: STRING>, "
+    "code STRUCT<coding: ARRAY<STRUCT<system: STRING, code: STRING, display: STRING>>>, "
+    "valueQuantity STRUCT<value: DOUBLE, unit: STRING>"
+)
+
+
+def parse_resources(bronze_df, schema):
+    """Expand bronze's raw resource_json into typed columns using an explicit schema."""
+    return bronze_df.select(F.from_json("resource_json", schema).alias("r")).select("r.*")
 
 def process_fhir_to_silver(spark=None, run_id=None):
     if spark is None:
@@ -21,20 +41,16 @@ def process_fhir_to_silver(spark=None, run_id=None):
     print(f"STARTING SILVER LAYER FHIR PROCESSING (Run ID: {run_id})")
     print(f"==================================================")
     
-    bronze_fhir_path = os.path.join(BRONZE_PATH, "fhir_raw")
-    if not os.path.exists(bronze_fhir_path):
-        print("No Bronze FHIR data found. Skipping FHIR processing.")
-        return
-        
-    bronze_df = read_df(spark, bronze_fhir_path)
-    
     # ----------------------------------------------------
     # 1. Process FHIR Patients
     # ----------------------------------------------------
     logger_pat = PipelineLogger(spark, run_id, "process_silver_fhir_patient", "fhir_r4", "SILVER")
-    patients_df = bronze_df.filter("resourceType = 'Patient'")
-    
-    if patients_df.count() > 0:
+    patients_df = (
+        parse_resources(read_bronze_current(spark, "bronze_fhir_patient"), FHIR_PATIENT_SCHEMA)
+        if bronze_exists("bronze_fhir_patient") else None
+    )
+
+    if patients_df is not None and patients_df.count() > 0:
         flat_patients = (
             patients_df
             .select(
@@ -70,9 +86,12 @@ def process_fhir_to_silver(spark=None, run_id=None):
     # 2. Process FHIR Observations
     # ----------------------------------------------------
     logger_obs = PipelineLogger(spark, run_id, "process_silver_fhir_observation", "fhir_r4", "SILVER")
-    obs_df = bronze_df.filter("resourceType = 'Observation'")
-    
-    if obs_df.count() > 0:
+    obs_df = (
+        parse_resources(read_bronze_current(spark, "bronze_fhir_observation"), FHIR_OBSERVATION_SCHEMA)
+        if bronze_exists("bronze_fhir_observation") else None
+    )
+
+    if obs_df is not None and obs_df.count() > 0:
         flat_obs = (
             obs_df
             .select(
