@@ -12,7 +12,9 @@ from pyspark.sql.types import StringType, TimestampType, StructType, StructField
 
 # Base Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LAKEHOUSE_PATH = os.path.join(BASE_DIR, "delta_lakehouse")
+# CLINICALFLOW_LAKEHOUSE lets tests point every layer at a throwaway directory.
+# It must be set before this module is imported (tests/conftest.py does that).
+LAKEHOUSE_PATH = os.environ.get("CLINICALFLOW_LAKEHOUSE", os.path.join(BASE_DIR, "delta_lakehouse"))
 
 BRONZE_PATH = os.path.join(LAKEHOUSE_PATH, "bronze")
 SILVER_PATH = os.path.join(LAKEHOUSE_PATH, "silver")
@@ -37,6 +39,9 @@ def get_spark_session(app_name="ClinicalFlow_Lakehouse"):
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.driver.memory", "1g")
+        # Timestamps are stored and compared in UTC; without this, Spark renders them in the
+        # machine's local zone and watermarks shift by the UTC offset.
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     )
