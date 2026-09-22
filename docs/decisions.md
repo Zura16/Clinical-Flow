@@ -57,7 +57,21 @@ Every non-obvious choice: what we decided, why, the alternative rejected, and wh
 
 ## 2026-09-22 — Finding: incremental doesn't mean cheap for file sources
 
-**Measured at ~366k records:** first bronze run 1:52; second run, which lands 0 rows for all 12 watermark and CDC tables, took **2:11 — longer than the first.** CDC tables are genuinely cheap (SQL Server returns an empty change set), but the FHIR watermark tables still read and parse all 22 bundle files (~55 MB) just to discover nothing is new, and the two Full tables re-land 20k rows by design.
-**Why:** a watermark over files is a filter applied *after* reading. Only a source that can answer "what changed since X" without a scan (a CDC log, a partitioned path layout, a modification-time filter) makes incremental cheap.
-**What would fix it:** land FHIR in dated directories and read only new partitions, or filter on file modification time before parsing.
+**Measured at ~366k records:** first bronze run 1:52; second run, which lands 0 rows for all 12 watermark and CDC tables, took **2:11 — longer than the first.**
+
+**Corrected attribution (2026-09-22, measured per source group):** the first explanation here blamed re-reading the FHIR files. Measurement says that is only part of it:
+
+| Group | Tables | Second-run time | Per table |
+|---|---|---|---|
+| fhir_r4 | 6 | 62 s | ~10 s |
+| sql_ehr (CDC) | 6 | 53 s | ~9 s |
+| claims_csv (Full) | 2 | 26 s | ~13 s |
+| Spark session startup | — | 6 s | — |
+
+Reading and parsing *all* 22 FHIR bundles takes **3.2 s total**, so the six FHIR tables spend ~19 s of their 62 s on re-reads and the rest on fixed per-table cost. The CDC tables read nothing at all and still cost ~9 s each.
+
+**Why:** the dominant cost at this scale is per-table overhead, not data: each table runs a `count()`, a Delta write (even for zero rows), an audit-table commit and a watermark MERGE. Fourteen tables x ~4 small Delta commits is roughly two minutes regardless of volume. Delta commits are cheap per byte and expensive per call.
+**Secondary:** a watermark over files filters *after* reading, so it can only be made cheap by pruning before the read.
+**What would fix each part:** for the re-reads, filter on `_metadata.file_modification_time` before parsing (measured: 3.2 s -> 0.1 s, and the file listing does prune). For the fixed cost, skip the write entirely when an increment is empty, and batch the audit rows into one commit per run — though writing the audit row per table immediately is what makes a crashed run diagnosable, so that one is a real trade, not a free win.
+**Lesson:** attribute cost by measurement before writing the explanation down. The first version of this entry sounded right and was wrong.
 **Interview version:** "Incremental ingestion only saves work if the source can answer 'what changed' without a full scan. My CDC tables cost nothing when idle; my file-based FHIR source still reads every file to find nothing, which I measured rather than assumed."
