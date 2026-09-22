@@ -42,3 +42,22 @@ Every non-obvious choice: what we decided, why, the alternative rejected, and wh
 ## 2026-09-21 — Spark session timezone pinned to UTC
 
 **Finding:** casting FHIR `meta.lastUpdated` `…19:35:29Z` gave `12:35:29`, the laptop's local time, so watermarks would shift with whoever ran the job. **Decision:** `spark.sql.session.timeZone=UTC`. Zone-less EHR timestamps are treated as UTC. That's an assumption, and it's documented here. **Interview version:** "Timestamps are compared in UTC at the session level, so a watermark means the same thing on every machine."
+
+## 2026-09-22 — SQL Server CDC as the EHR source, with LSN watermarks
+
+**Decision:** the six EHR tables move from timestamp watermarks over CSV to SQL Server CDC over JDBC. The watermark becomes the LSN (log sequence number), SQL Server's position in its transaction log, stored as 20 hex characters so it stays fixed-width and sorts correctly as a string. First load snapshots the table as of the current max LSN and marks the rows operation 0; later runs read `cdc.fn_cdc_get_all_changes_*` between LSNs and land operations 2 (insert), 4 (update after-image) and 1 (delete).
+**Why this beats a timestamp watermark:** it closes the gap where a row committed later carrying an earlier `updated_at` is never seen, and it is the only way to observe hard deletes. A deleted row simply stops existing, so no query over the table can find it.
+**Deletes:** bronze keeps the delete row as the evidence the deletion happened; silver's current-state read drops keys whose last change was a delete. Bronze is the audit trail, silver is the current picture.
+**Access split:** pymssql for control statements and LSN functions, Spark JDBC for bulk reads, which is what a Databricks job would do.
+**Retention is a real failure mode:** CDC keeps changes for 3 days by default. If the stored LSN is older than the capture's minimum, changes were cleaned up before ingestion and the run fails loudly, asking for a re-snapshot. A quiet "resume from the new minimum" would silently skip data. This guard can fire falsely if cleanup advances the minimum during a long idle period; the fix is the same (re-snapshot), and the alternative (silence) is worse.
+**Snapshot race, accepted:** rows written between reading max LSN and reading the table appear in both the snapshot and the next increment. The later copy has the higher LSN and wins in current-state resolution, so the result converges. Avoiding it entirely needs a snapshot-isolation read.
+**Two watermark formats:** a timestamp and an LSN are not comparable, so `watermark_state` records which kind it holds and ignores a stored position when a table's ingestion type changes. Found while switching these tables over; without it, an old timestamp would compare as greater than every LSN and the table would never advance.
+**Platform note:** SQL Server has no arm64 image, so on Apple Silicon it runs emulated. Works, but slower than native, and it's the reason the compose file pins `platform: linux/amd64`.
+**Interview version:** "The EHR source is SQL Server with CDC. I track position by LSN rather than a modified timestamp, which is what lets me capture hard deletes and avoids missing rows committed out of timestamp order. If CDC retention has passed my stored LSN, the run fails and asks for a re-snapshot instead of silently skipping changes."
+
+## 2026-09-22 — Finding: incremental doesn't mean cheap for file sources
+
+**Measured at ~366k records:** first bronze run 1:52; second run, which lands 0 rows for all 12 watermark and CDC tables, took **2:11 — longer than the first.** CDC tables are genuinely cheap (SQL Server returns an empty change set), but the FHIR watermark tables still read and parse all 22 bundle files (~55 MB) just to discover nothing is new, and the two Full tables re-land 20k rows by design.
+**Why:** a watermark over files is a filter applied *after* reading. Only a source that can answer "what changed since X" without a scan (a CDC log, a partitioned path layout, a modification-time filter) makes incremental cheap.
+**What would fix it:** land FHIR in dated directories and read only new partitions, or filter on file modification time before parsing.
+**Interview version:** "Incremental ingestion only saves work if the source can answer 'what changed' without a full scan. My CDC tables cost nothing when idle; my file-based FHIR source still reads every file to find nothing, which I measured rather than assumed."

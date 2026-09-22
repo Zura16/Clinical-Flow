@@ -17,3 +17,15 @@ Dated journal of what landed. Newest last.
   - ADF ingestion pipeline passes source, table and RunId.
   - README and runbook corrected to match the code, with unbuilt features marked *(planned)*.
   - Tests: 12 pass (6:33). Real lakehouse rebuilt end to end; a second bronze run lands 0 rows on all 12 watermark tables.
+
+## 2026-09-22
+
+- Fix plan step 2 (real sources) landed:
+  - SQL Server 2022 in Docker with the SQL Agent and CDC enabled on all six EHR tables; `scripts/setup_source_db.py` applies the DDL and BULK INSERTs the extracts.
+  - Bronze reads CDC through Spark JDBC with LSN watermarks: snapshot on first load, then inserts/updates/deletes. Retention gaps fail loudly.
+  - Silver resolves CDC current state by log position and drops deleted keys; bronze keeps the delete rows.
+  - `scripts/simulate_source_changes.py` applies inserts/updates/deletes (cascading through the FK chain) for demos and tests.
+  - Generator scaled to ~366k records and FHIR split across 22 bundle files.
+  - Verified: bronze current state reconciles exactly to SQL Server for all six tables (e.g. patients bronze 1,020 rows / current 1,001 = source 1,001 after an insert and a cascading delete).
+  - Finding: the second bronze run (0 new rows) is *slower* than the first, because file-based watermark sources still read everything. See decisions.
+  - Tests: 13 pass; the CDC test skips when SQL Server isn't running.

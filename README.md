@@ -105,9 +105,17 @@ clinicalflow/
 ## 🚀 Quickstart & Execution Guide
 
 ### 1. Generate Synthetic Data
-Generate realistic FHIR R4 JSON bundles, EHR SQL transactional tables, and Claims CSV feeds:
+Generate FHIR R4 bundles, EHR extracts, and Claims CSV feeds (defaults: ~366k records):
 ```bash
-python sample-data/generate_clinical_data.py
+python sample-data/generate_clinical_data.py            # --ehr-patients / --fhir-patients / --claims
+```
+
+### 1b. Start the SQL Server source and load it
+Requires Docker and an `.env` with `MSSQL_SA_PASSWORD` (see `.env.example`):
+```bash
+docker compose up -d sqlserver
+python -m scripts.setup_source_db                       # schema + CDC + BULK INSERT (--reset to rebuild)
+python -m scripts.simulate_source_changes               # optional: inserts/updates/deletes for CDC to capture
 ```
 
 ### 2. Run End-to-End Medallion Pipeline
