@@ -180,6 +180,21 @@ def add_bronze_metadata(df: DataFrame, run_id: str, cfg: SourceConfig) -> DataFr
 # Restart support
 # ---------------------------------------------------------------------------
 
+def run_partition_exists(spark: SparkSession, target: str, run_id: str) -> bool:
+    """Whether this run already wrote a partition, by listing directories.
+
+    A Spark query to answer this costs ~1.7s; the partition layout makes it a directory check.
+    """
+    if not os.path.isdir(target):
+        return False
+    marker = f"_pipeline_run_id={run_id}"
+    return any(
+        os.path.isdir(os.path.join(target, date_dir, marker))
+        for date_dir in os.listdir(target)
+        if date_dir.startswith("_ingest_date=")
+    )
+
+
 def find_successful_attempt(spark: SparkSession, run_id: str, pipeline_name: str):
     """The audit row of this run ID's successful attempt at this table, or None."""
     if not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
@@ -235,13 +250,17 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         if cfg.ingestion_type == "Watermark":
             wm_end = max_watermark(landed, cfg.watermark_column) if rows else wm_start
 
-        (
-            landed.write.format("delta")
-            .mode("overwrite")
-            .option("replaceWhere", f"_pipeline_run_id = '{run_id}'")
-            .partitionBy("_ingest_date", "_pipeline_run_id")
-            .save(target)
-        )
+        # An empty increment with nothing already written for this run has nothing to commit.
+        # A Delta commit costs seconds, and on an idle run that is most of the run's cost.
+        # The exception is a retry whose earlier attempt did write: that partition must be replaced.
+        if rows or run_partition_exists(spark, target, run_id):
+            (
+                landed.write.format("delta")
+                .mode("overwrite")
+                .option("replaceWhere", f"_pipeline_run_id = '{run_id}'")
+                .partitionBy("_ingest_date", "_pipeline_run_id")
+                .save(target)
+            )
         landed.unpersist()
 
         logger.log_run(rows_read=rows, rows_inserted=rows, watermark_start=wm_start, watermark_end=wm_end, status="SUCCESS")

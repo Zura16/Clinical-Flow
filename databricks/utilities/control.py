@@ -22,6 +22,16 @@ WATERMARK_STATE_PATH = os.path.join(META_PATH, "watermark_state")
 
 INGESTION_TYPES = {"Full", "Watermark", "CDC"}
 
+# pipeline_config is reconciled with the seed once per process, not once per lookup: the seed
+# MERGE is a Spark job, and measuring showed it dominated per-table cost (9.8s of every lookup).
+# Anything that changes the table in-process calls clear_caches().
+_SEEDED = False
+
+
+def clear_caches() -> None:
+    global _SEEDED
+    _SEEDED = False
+
 
 @dataclass(frozen=True)
 class SourceConfig:
@@ -87,9 +97,13 @@ def ensure_pipeline_config(spark: SparkSession) -> None:
     The seed defines HOW a source is ingested, so those columns are refreshed on every run.
     active_flag is operational, not definitional: an operator turning a table off keeps it off.
     """
+    global _SEEDED
+    if _SEEDED:
+        return
     seed_df = spark.createDataFrame([asdict(c) for c in PIPELINE_CONFIG_SEED], PIPELINE_CONFIG_SCHEMA)
     if not DeltaTable.isDeltaTable(spark, PIPELINE_CONFIG_PATH):
         seed_df.write.format("delta").save(PIPELINE_CONFIG_PATH)
+        _SEEDED = True
         return
     definition_columns = {c: f"s.{c}" for c in seed_df.columns if c != "active_flag"}
     (
@@ -99,6 +113,7 @@ def ensure_pipeline_config(spark: SparkSession) -> None:
         .whenNotMatchedInsertAll()
         .execute()
     )
+    _SEEDED = True
 
 
 def load_source_configs(spark: SparkSession, source_name: str | None = None,

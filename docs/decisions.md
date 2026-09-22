@@ -75,3 +75,24 @@ Reading and parsing *all* 22 FHIR bundles takes **3.2 s total**, so the six FHIR
 **What would fix each part:** for the re-reads, filter on `_metadata.file_modification_time` before parsing (measured: 3.2 s -> 0.1 s, and the file listing does prune). For the fixed cost, skip the write entirely when an increment is empty, and batch the audit rows into one commit per run — though writing the audit row per table immediately is what makes a crashed run diagnosable, so that one is a real trade, not a free win.
 **Lesson:** attribute cost by measurement before writing the explanation down. The first version of this entry sounded right and was wrong.
 **Interview version:** "Incremental ingestion only saves work if the source can answer 'what changed' without a full scan. My CDC tables cost nothing when idle; my file-based FHIR source still reads every file to find nothing, which I measured rather than assumed."
+
+## 2026-09-22 — The predicted cheap win wasn't the win; the profiler found the real one
+
+**Predicted:** skipping the Delta write for an empty increment would cut most of the ~9s-per-table idle cost.
+**Measured:** it changed nothing (fhir_r4 group 62s -> 72s, inside noise). Phase timings for one idle CDC table told the real story:
+
+| Phase | Time |
+|---|---|
+| `get_source_config` | **9.75 s** |
+| `advance_watermark` (Delta MERGE) | 3.23 s |
+| `run_partition_exists` (Spark query) | 1.74 s |
+| `get_watermark` | 1.30 s |
+| audit `log_run` (Delta append) | 0.71 s |
+| CDC read over JDBC | 0.56 s |
+| `count()` | 0.13 s |
+
+**Cause:** `get_source_config` re-ran the seed MERGE against `pipeline_config` on *every* lookup — a full Spark job to read one row. **Fix:** reconcile the seed once per process, and answer "did this run already write a partition?" by listing directories instead of querying Delta.
+**Result:** fhir_r4 62s -> 52s, sql_ehr 53s -> 42s, claims_csv 26s -> 22s, with no change to behavior.
+**Kept anyway:** the empty-write skip stays, because not committing nothing is still right; it just isn't where the time went.
+**Still on the table:** `advance_watermark` is 3.2s per table because each is its own MERGE. Batching them into one MERGE per run would save ~40s, at the cost of a crash window where bronze is committed but the watermark hasn't moved (rows would be re-landed and deduplicated downstream). Not taken yet.
+**Interview version:** "I guessed the expensive part and was wrong. Profiling showed a config lookup was re-running a MERGE on every call, which cost more than all the I/O combined. Caching it cut idle runtime by about 20% with no behavior change."
