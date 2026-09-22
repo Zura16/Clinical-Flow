@@ -53,7 +53,7 @@ Cross-cutting: pipeline_config (metadata) · data_quality_rule + quarantine · p
 5. **PHI line:** SSNs are hashed before silver; names/addresses stay out of any shareable mart; masking is demonstrated, not assumed.
 6. **No secrets in git.** Passwords and connection strings come from `.env` (gitignored) or environment variables; `docker-compose.yml` references variables, never literals.
 7. **Surrogate keys are stable.** Never `monotonically_increasing_id()` for SKs that must survive reruns. Unknown member `-1` exists as a real row in every dimension.
-8. **macOS/zsh environment.** Use the project `venv/` (`venv/bin/python`). Docker is **not** installed yet — SQL Server work is blocked until it is.
+8. **macOS/zsh environment.** Use the project `venv/` (`venv/bin/python`), and run modules from the repo root (`PYTHONPATH=. venv/bin/python -m ...`). Docker's CLI is not on PATH: use `/Applications/Docker.app/Contents/Resources/bin/docker`. SQL Server runs emulated (no arm64 image).
 
 ## Conventions
 
@@ -69,16 +69,21 @@ Cross-cutting: pipeline_config (metadata) · data_quality_rule + quarantine · p
 | Local lakehouse root | `delta_lakehouse/{bronze,silver,gold,metadata}` (gitignored) |
 | Source data | `sample-data/{fhir_r4,sql_ehr,claims_csv}` (gitignored; regenerate with the generator) |
 | Stack (venv) | Python 3.12 · PySpark 4.1.1 · delta-spark 4.3.1 · Java 17 |
-| Current data volume | 1,000 patients · ~5K lab results (target: 100K–1M records) |
+| Current data volume | **~366K records**: EHR 20,000 patients / 39,970 encounters / 39,970 diagnoses / 100,027 lab results / 39,970 medications / 50 providers · FHIR 5,000 patients / 75,732 observations / 12,622 encounters / 12,622 conditions (22 bundle files) · 20,000 claims / 5 facilities |
 | Control tables (DDL) | `pipeline_config`, `data_quality_rule`, `quarantine_records`, `pipeline_run_audit` — `sql/quality/01_data_quality_framework.sql` |
-| Canonical counts (current generator seed) | bronze first load: ehr patients 1,000 · encounters/diagnoses/medications 1,993 · lab_results 5,021 · providers 50 · fhir Observation 6,325 · Encounter/Condition 1,265 · Patient 500 · MedicationRequest/Practitioner **0** (generator doesn't emit them) · claims 1,500 · facilities 5. Silver: 1,000 / 1,993 / 6,325 / 500 / 1,500. **Second bronze run: 0 rows on all 12 watermark tables.** |
+| Canonical checks | Second bronze run lands **0 rows** on all 12 watermark/CDC tables (only the 2 Full tables re-land). Bronze current state reconciles **exactly** to `SELECT COUNT(*)` in SQL Server per table. MedicationRequest/Practitioner are **0** — the generator doesn't emit them. |
+| Timings (~366K records, local) | bronze first run **1:52** · second run **2:11** (slower: file watermark sources still read everything — see decisions) · test suite ~6 min |
+| SQL Server source | `ehr_source` on localhost:1433, CDC on 6 tables, sa password in `.env` (gitignored). JDBC via `com.microsoft.sqlserver:mssql-jdbc:12.8.1.jre11`, control statements via `pymssql`. |
 | Control / metadata tables | `metadata/{pipeline_config (14 rows), watermark_state, pipeline_run_audit, quarantine_records}` |
 | Bronze layout | `bronze/<destination_table>`, partitioned `_ingest_date`/`_pipeline_run_id`; audit statuses `SUCCESS`/`FAILED`/`SKIPPED` |
 
 ## Common commands (repo root)
 
 ```bash
-venv/bin/python sample-data/generate_clinical_data.py          # regenerate synthetic sources
+venv/bin/python sample-data/generate_clinical_data.py          # regenerate synthetic sources (~366K records)
+/Applications/Docker.app/Contents/Resources/bin/docker compose up -d sqlserver   # SQL Server source
+PYTHONPATH=. venv/bin/python -m scripts.setup_source_db         # schema + CDC + BULK INSERT (--reset to rebuild)
+PYTHONPATH=. venv/bin/python -m scripts.simulate_source_changes # inserts/updates/deletes for CDC to capture
 venv/bin/python -m databricks.bronze.ingest_raw_data            # bronze (all active pipeline_config rows)
 venv/bin/python -m databricks.bronze.ingest_raw_data --run-id <id> [--source S --table T]  # restart a run: landed tables skipped, failed ones retried
 venv/bin/python -m databricks.silver.process_fhir_silver        # silver (FHIR)
@@ -93,7 +98,7 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 ## Fix plan (gap analysis of 2026-09-21)
 
 - [x] **1. Foundations** — remove commit-automation bot; real Delta (no Parquet fallback); secrets out of compose
-- [ ] **2. Real sources** — SQL Server + CDC in Docker, loaded from the generator (or Synthea); scale to 100K+
+- [x] **2. Real sources** — SQL Server + CDC in Docker, loaded from the generator (or Synthea); scale to 100K+
 - [x] **3. Bronze** — append-only, partitioned, driven by `pipeline_config`, per-source watermarks
 - [ ] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
 - [ ] **5. Data quality** — rules from `data_quality_rule`, missing rule types, thresholds that fail the run, idempotent quarantine
@@ -105,6 +110,7 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** steps 1 ✅ and 3 ✅ (2026-09-21). **Next: step 2 (SQL Server + CDC)** once Docker is installed; otherwise step 4 (silver MERGE). Bronze is append-only, config-driven, watermarked and restartable.
+- **Phase:** steps 1 ✅, 2 ✅, 3 ✅ (2026-09-22). **Next: step 4 (silver/gold MERGE)** — the last big correctness gap. Sources are real: SQL Server CDC + FHIR bundles + claims CSV, ~366K records.
 - **Bronze restart semantics (don't regress):** a succeeded run ID is SKIPPED and never re-extracted, because its partition is the only copy of past source versions. A failed run ID is retried from the current watermark. Commit order: write → SUCCESS audit → watermark. See decisions.md, "replay destroyed bronze history".
-- **Known issues:** silver/gold still full-overwrite (`save_df` with `overwriteSchema=true`); DQ rules hard-coded; quarantine appends duplicate on rerun; SCD2 SKs unstable and facts join the current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; old tests assert little; `dim_facility` never built (no `silver_facilities`). The generator emits no MedicationRequest/Practitioner. Watermark `>` can miss same-timestamp late rows (fixed by CDC). Test suite takes ~6.5 min. Docker not installed. Old SA password is in git history and was pushed by the old bot: treat it as burned.
+- **CDC semantics (don't regress):** LSN watermarks (20 hex chars, string-comparable); snapshot on first load; deletes land in bronze and are dropped by silver's current-state read; a retention gap fails the run rather than skipping changes.
+- **Known issues:** silver/gold still full-overwrite (`save_df` with `overwriteSchema=true`); DQ rules hard-coded; quarantine appends duplicate on rerun; SCD2 SKs unstable and facts join the current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; `dim_facility` never built (no `silver_facilities`); silver only covers patients/encounters/claims/FHIR Patient+Observation — diagnoses, labs, medications, providers land in bronze and stop there. Generator emits no MedicationRequest/Practitioner. Old SA password is in git history and was pushed by the old bot: treat it as burned.
