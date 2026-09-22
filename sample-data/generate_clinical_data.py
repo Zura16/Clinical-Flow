@@ -67,7 +67,7 @@ def random_date(start_year=1950, end_year=2024):
     end = datetime(end_year, 1, 1)
     return start + timedelta(seconds=random.randint(0, int((end - start).total_seconds())))
 
-def generate_fhir_r4_bundle(num_patients=1000, num_obs_per_patient=10):
+def generate_fhir_r4_bundle(num_patients=1000, num_obs_per_patient=10, resources_per_bundle=5000):
     """Generates Synthea-like FHIR R4 JSON resource bundles"""
     print(f"Generating {num_patients} FHIR R4 Patient records and associated resources...")
     resources = []
@@ -146,16 +146,24 @@ def generate_fhir_r4_bundle(num_patients=1000, num_obs_per_patient=10):
             }
             resources.append(cond_res)
 
-    bundle = {
-        "resourceType": "Bundle",
-        "type": "transaction",
-        "entry": [{"resource": r} for r in resources]
-    }
-    
-    file_path = os.path.join(OUTPUT_FHIR_DIR, "fhir_r4_synthetic_bundle.json")
-    with open(file_path, "w") as f:
-        json.dump(bundle, f, indent=2)
-    print(f"Saved FHIR R4 bundle to {file_path} with {len(resources)} total resources.")
+    # Written as several bundle files, the way Synthea emits one bundle per patient: bronze reads
+    # each file whole, so a single multi-GB bundle would have to fit in one executor's memory.
+    for old in os.listdir(OUTPUT_FHIR_DIR):
+        if old.endswith(".json"):
+            os.remove(os.path.join(OUTPUT_FHIR_DIR, old))
+
+    files = 0
+    for start in range(0, len(resources), resources_per_bundle):
+        chunk = resources[start:start + resources_per_bundle]
+        bundle = {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [{"resource": r} for r in chunk],
+        }
+        files += 1
+        with open(os.path.join(OUTPUT_FHIR_DIR, f"fhir_r4_bundle_{files:04d}.json"), "w") as f:
+            json.dump(bundle, f)
+    print(f"Saved {len(resources)} FHIR R4 resources across {files} bundle files in {OUTPUT_FHIR_DIR}.")
 
 def generate_ehr_sql_csvs(num_patients=5000):
     """Generates relational SQL EHR transactional datasets"""
@@ -332,7 +340,16 @@ def generate_claims_csv(num_claims=3000):
     print(f"Saved Claims and Facilities CSVs in {OUTPUT_CLAIMS_DIR}")
 
 if __name__ == "__main__":
-    generate_fhir_r4_bundle(num_patients=500, num_obs_per_patient=5)
-    generate_ehr_sql_csvs(num_patients=1000)
-    generate_claims_csv(num_claims=1500)
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--ehr-patients", type=int, default=20000, help="patients in the SQL Server EHR extract")
+    parser.add_argument("--fhir-patients", type=int, default=5000, help="patients in the FHIR bundles")
+    parser.add_argument("--observations-per-patient", type=int, default=6)
+    parser.add_argument("--claims", type=int, default=20000)
+    args = parser.parse_args()
+
+    generate_fhir_r4_bundle(num_patients=args.fhir_patients, num_obs_per_patient=args.observations_per_patient)
+    generate_ehr_sql_csvs(num_patients=args.ehr_patients)
+    generate_claims_csv(num_claims=args.claims)
     print("All synthetic healthcare data generation completed successfully!")
