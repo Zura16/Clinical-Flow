@@ -31,6 +31,7 @@ from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+from databricks.utilities import sqlserver as mssql
 from databricks.utilities.config import BASE_DIR, BRONZE_PATH, get_spark_session
 from databricks.utilities.control import SourceConfig, advance_watermark, get_watermark, load_source_configs
 from databricks.utilities.logger import AUDIT_TABLE_PATH, PipelineLogger
@@ -79,10 +80,58 @@ def read_fhir_source(spark: SparkSession, location: str, cfg: SourceConfig) -> D
 
 
 SOURCE_READERS = {
-    "sql_ehr": read_csv_source,  # CSV extracts stand in for SQL Server until fix-plan step 2
     "claims_csv": read_csv_source,
     "fhir_r4": read_fhir_source,
 }
+
+# CDC operation codes as SQL Server reports them, plus 0 for rows we read from the table itself.
+CDC_SNAPSHOT, CDC_DELETE, CDC_INSERT, CDC_UPDATE_AFTER = 0, 1, 2, 4
+
+
+def read_cdc_increment(spark: SparkSession, cfg: SourceConfig, wm_start: str | None) -> tuple[DataFrame, str]:
+    """Changes from SQL Server CDC since wm_start, with the LSN they are read up to.
+
+    First load has no position to resume from, so it reads the table itself as of the current
+    max LSN and marks the rows CDC_SNAPSHOT. CDC retention (3 days by default) is a change buffer,
+    not a history store, so the snapshot is what establishes the baseline.
+
+    Any row written between reading max LSN and reading the table appears both in the snapshot and
+    in the next increment. The later copy has the higher LSN, so current-state resolution picks it.
+    """
+    table = cfg.source_table
+    to_lsn = mssql.max_lsn()
+    if to_lsn is None:
+        raise ValueError("SQL Server returned no max LSN: is the SQL Agent running and CDC enabled?")
+    columns = ", ".join(f"[{c}]" for c in mssql.business_columns(table))
+
+    if wm_start is None:
+        sql = (f"SELECT '{to_lsn}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
+               f"{CDC_SNAPSHOT} AS _cdc_operation, {columns} FROM dbo.{table}")
+        return mssql.read_query(spark, sql), to_lsn
+
+    from_lsn = mssql.increment_lsn(wm_start)
+    if from_lsn > to_lsn:
+        # Nothing has been written to the log since the last run.
+        empty = (f"SELECT '{wm_start}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
+                 f"{CDC_SNAPSHOT} AS _cdc_operation, {columns} FROM dbo.{table} WHERE 1 = 0")
+        return mssql.read_query(spark, empty), wm_start
+
+    min_lsn = mssql.min_lsn(table)
+    if min_lsn and from_lsn < min_lsn:
+        raise ValueError(
+            f"CDC retention gap on dbo.{table}: need changes from {from_lsn}, but the capture only "
+            f"retains from {min_lsn}. Changes were cleaned up before they were ingested; the table "
+            "must be re-snapshotted (clear its watermark_state row) rather than silently skipped."
+        )
+
+    sql = (
+        "SELECT CONVERT(CHAR(20), __$start_lsn, 2) AS _cdc_lsn, "
+        "CONVERT(CHAR(20), __$seqval, 2) AS _cdc_seqval, "
+        f"__$operation AS _cdc_operation, {columns} "
+        f"FROM cdc.fn_cdc_get_all_changes_{mssql.capture_instance(table)}("
+        f"CONVERT(BINARY(10), '{from_lsn}', 2), CONVERT(BINARY(10), '{to_lsn}', 2), 'all')"
+    )
+    return mssql.read_query(spark, sql), to_lsn
 
 
 def read_source(spark: SparkSession, cfg: SourceConfig) -> DataFrame:
@@ -166,10 +215,14 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
             print(f"[BRONZE] {cfg.destination_table}: run {run_id} already landed {previous['rows_inserted']} rows; skipped")
             return previous["rows_inserted"]
 
-        source_df = read_source(spark, cfg)
+        # CDC builds its own query; other sources read a file.
+        source_df = read_source(spark, cfg) if cfg.ingestion_type != "CDC" else None
 
         if cfg.ingestion_type == "Full":
             increment, wm_end = source_df, None
+        elif cfg.ingestion_type == "CDC":
+            wm_start = get_watermark(spark, cfg)
+            increment, wm_end = read_cdc_increment(spark, cfg, wm_start)
         else:
             bad = count_bad_watermarks(source_df, cfg.watermark_column)
             if bad:
@@ -179,7 +232,7 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
 
         landed = add_bronze_metadata(increment, run_id, cfg).cache()
         rows = landed.count()
-        if cfg.ingestion_type != "Full":
+        if cfg.ingestion_type == "Watermark":
             wm_end = max_watermark(landed, cfg.watermark_column) if rows else wm_start
 
         (

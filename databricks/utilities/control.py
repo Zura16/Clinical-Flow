@@ -56,21 +56,20 @@ WATERMARK_STATE_SCHEMA = StructType([
     StructField("source_name", StringType(), False),
     StructField("source_table", StringType(), False),
     StructField("watermark_value", StringType(), False),
+    StructField("ingestion_type", StringType(), False),
     StructField("last_pipeline_run_id", StringType(), False),
     StructField("updated_at", StringType(), False),
 ])
 
-# Seed rows. source_location is relative to the repo root.
-# sql_ehr reads CSV extracts as a stand-in for SQL Server until fix-plan step 2; those rows
-# become ingestion_type 'CDC' with a JDBC location once the database exists.
+# Seed rows. source_location is a repo-relative path for file sources, or schema.table for CDC.
 # Keep in sync with the INSERT in sql/quality/01_data_quality_framework.sql.
 PIPELINE_CONFIG_SEED = [
-    SourceConfig("sql_ehr", "patients", "bronze_ehr_patients", "Watermark", "updated_at", "patient_id", "sample-data/sql_ehr/patients.csv", True, 98.0),
-    SourceConfig("sql_ehr", "encounters", "bronze_ehr_encounters", "Watermark", "updated_at", "encounter_id", "sample-data/sql_ehr/encounters.csv", True, 98.0),
-    SourceConfig("sql_ehr", "providers", "bronze_ehr_providers", "Watermark", "updated_at", "provider_id", "sample-data/sql_ehr/providers.csv", True, 99.0),
-    SourceConfig("sql_ehr", "diagnoses", "bronze_ehr_diagnoses", "Watermark", "updated_at", "diagnosis_id", "sample-data/sql_ehr/diagnoses.csv", True, 95.0),
-    SourceConfig("sql_ehr", "lab_results", "bronze_ehr_lab_results", "Watermark", "updated_at", "lab_result_id", "sample-data/sql_ehr/lab_results.csv", True, 95.0),
-    SourceConfig("sql_ehr", "medications", "bronze_ehr_medications", "Watermark", "updated_at", "medication_order_id", "sample-data/sql_ehr/medications.csv", True, 95.0),
+    SourceConfig("sql_ehr", "patients", "bronze_ehr_patients", "CDC", "_cdc_lsn", "patient_id", "dbo.patients", True, 98.0),
+    SourceConfig("sql_ehr", "encounters", "bronze_ehr_encounters", "CDC", "_cdc_lsn", "encounter_id", "dbo.encounters", True, 98.0),
+    SourceConfig("sql_ehr", "providers", "bronze_ehr_providers", "CDC", "_cdc_lsn", "provider_id", "dbo.providers", True, 99.0),
+    SourceConfig("sql_ehr", "diagnoses", "bronze_ehr_diagnoses", "CDC", "_cdc_lsn", "diagnosis_id", "dbo.diagnoses", True, 95.0),
+    SourceConfig("sql_ehr", "lab_results", "bronze_ehr_lab_results", "CDC", "_cdc_lsn", "lab_result_id", "dbo.lab_results", True, 95.0),
+    SourceConfig("sql_ehr", "medications", "bronze_ehr_medications", "CDC", "_cdc_lsn", "medication_order_id", "dbo.medications", True, 95.0),
     SourceConfig("fhir_r4", "Patient", "bronze_fhir_patient", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 98.0),
     SourceConfig("fhir_r4", "Encounter", "bronze_fhir_encounter", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 95.0),
     SourceConfig("fhir_r4", "Observation", "bronze_fhir_observation", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 95.0),
@@ -83,18 +82,20 @@ PIPELINE_CONFIG_SEED = [
 
 
 def ensure_pipeline_config(spark: SparkSession) -> None:
-    """Create pipeline_config from the seed, or insert seed rows that are missing.
+    """Create pipeline_config from the seed, or reconcile it with the seed.
 
-    Existing rows are never overwritten, so an operator's change (e.g. active_flag = false)
-    survives reruns.
+    The seed defines HOW a source is ingested, so those columns are refreshed on every run.
+    active_flag is operational, not definitional: an operator turning a table off keeps it off.
     """
     seed_df = spark.createDataFrame([asdict(c) for c in PIPELINE_CONFIG_SEED], PIPELINE_CONFIG_SCHEMA)
     if not DeltaTable.isDeltaTable(spark, PIPELINE_CONFIG_PATH):
         seed_df.write.format("delta").save(PIPELINE_CONFIG_PATH)
         return
+    definition_columns = {c: f"s.{c}" for c in seed_df.columns if c != "active_flag"}
     (
         DeltaTable.forPath(spark, PIPELINE_CONFIG_PATH).alias("t")
         .merge(seed_df.alias("s"), "t.source_name = s.source_name AND t.source_table = s.source_table")
+        .whenMatchedUpdate(set=definition_columns)
         .whenNotMatchedInsertAll()
         .execute()
     )
@@ -133,18 +134,30 @@ def get_watermark(spark: SparkSession, cfg: SourceConfig) -> str | None:
     rows = (
         spark.read.format("delta").load(WATERMARK_STATE_PATH)
         .filter((F.col("source_name") == cfg.source_name) & (F.col("source_table") == cfg.source_table))
-        .select("watermark_value")
+        .select("watermark_value", "ingestion_type")
         .collect()
     )
-    return rows[0]["watermark_value"] if rows else None
+    if not rows:
+        return None
+    # A timestamp watermark and an LSN watermark are not comparable. If the table's ingestion
+    # type changed, the stored position means nothing: start over with a fresh full read.
+    if rows[0]["ingestion_type"] != cfg.ingestion_type:
+        print(f"[WATERMARK] {cfg.source_name}.{cfg.source_table}: ingestion_type changed "
+              f"{rows[0]['ingestion_type']} -> {cfg.ingestion_type}; ignoring the stored watermark")
+        return None
+    return rows[0]["watermark_value"]
 
 
 def advance_watermark(spark: SparkSession, cfg: SourceConfig, new_value: str, run_id: str) -> None:
-    """Move the watermark forward to new_value. Never moves it backwards (a replay of an old run
-    must not rewind the table's position)."""
+    """Move the watermark forward to new_value. Never moves it backwards (a rerun of an old run
+    must not rewind the table's position).
+
+    Both watermark formats are fixed-width and zero-padded (timestamps 'yyyy-MM-dd HH:mm:ss.ffffff',
+    LSNs 20 hex characters), so a string comparison orders them the same way the values do.
+    """
     update_df = spark.createDataFrame(
-        [(cfg.source_name, cfg.source_table, new_value, run_id)],
-        "source_name STRING, source_table STRING, watermark_value STRING, last_pipeline_run_id STRING",
+        [(cfg.source_name, cfg.source_table, new_value, cfg.ingestion_type, run_id)],
+        "source_name STRING, source_table STRING, watermark_value STRING, ingestion_type STRING, last_pipeline_run_id STRING",
     ).withColumn("updated_at", F.date_format(F.current_timestamp(), "yyyy-MM-dd HH:mm:ss.SSSSSS"))
 
     if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
@@ -152,7 +165,7 @@ def advance_watermark(spark: SparkSession, cfg: SourceConfig, new_value: str, ru
     (
         DeltaTable.forPath(spark, WATERMARK_STATE_PATH).alias("t")
         .merge(update_df.alias("s"), "t.source_name = s.source_name AND t.source_table = s.source_table")
-        .whenMatchedUpdateAll(condition="CAST(s.watermark_value AS TIMESTAMP) > CAST(t.watermark_value AS TIMESTAMP)")
+        .whenMatchedUpdateAll(condition="s.ingestion_type <> t.ingestion_type OR s.watermark_value > t.watermark_value")
         .whenNotMatchedInsertAll()
         .execute()
     )

@@ -27,15 +27,15 @@ CREATE TABLE dbo.pipeline_config (
 );
 
 -- Seed metadata for active sources. Mirrors PIPELINE_CONFIG_SEED in databricks/utilities/control.py.
--- sql_ehr rows use Watermark over CSV extracts until SQL Server CDC lands (fix plan step 2).
+-- sql_ehr rows read SQL Server CDC; watermark_column names the bronze column holding the log position.
 INSERT INTO dbo.pipeline_config (source_name, source_table, destination_table, ingestion_type, watermark_column, primary_key_columns, source_location, active_flag, data_quality_threshold)
 VALUES
-('sql_ehr', 'patients', 'bronze_ehr_patients', 'Watermark', 'updated_at', 'patient_id', 'sample-data/sql_ehr/patients.csv', 1, 98.00),
-('sql_ehr', 'encounters', 'bronze_ehr_encounters', 'Watermark', 'updated_at', 'encounter_id', 'sample-data/sql_ehr/encounters.csv', 1, 98.00),
-('sql_ehr', 'providers', 'bronze_ehr_providers', 'Watermark', 'updated_at', 'provider_id', 'sample-data/sql_ehr/providers.csv', 1, 99.00),
-('sql_ehr', 'diagnoses', 'bronze_ehr_diagnoses', 'Watermark', 'updated_at', 'diagnosis_id', 'sample-data/sql_ehr/diagnoses.csv', 1, 95.00),
-('sql_ehr', 'lab_results', 'bronze_ehr_lab_results', 'Watermark', 'updated_at', 'lab_result_id', 'sample-data/sql_ehr/lab_results.csv', 1, 95.00),
-('sql_ehr', 'medications', 'bronze_ehr_medications', 'Watermark', 'updated_at', 'medication_order_id', 'sample-data/sql_ehr/medications.csv', 1, 95.00),
+('sql_ehr', 'patients', 'bronze_ehr_patients', 'CDC', '_cdc_lsn', 'patient_id', 'dbo.patients', 1, 98.00),
+('sql_ehr', 'encounters', 'bronze_ehr_encounters', 'CDC', '_cdc_lsn', 'encounter_id', 'dbo.encounters', 1, 98.00),
+('sql_ehr', 'providers', 'bronze_ehr_providers', 'CDC', '_cdc_lsn', 'provider_id', 'dbo.providers', 1, 99.00),
+('sql_ehr', 'diagnoses', 'bronze_ehr_diagnoses', 'CDC', '_cdc_lsn', 'diagnosis_id', 'dbo.diagnoses', 1, 95.00),
+('sql_ehr', 'lab_results', 'bronze_ehr_lab_results', 'CDC', '_cdc_lsn', 'lab_result_id', 'dbo.lab_results', 1, 95.00),
+('sql_ehr', 'medications', 'bronze_ehr_medications', 'CDC', '_cdc_lsn', 'medication_order_id', 'dbo.medications', 1, 95.00),
 ('fhir_r4', 'Patient', 'bronze_fhir_patient', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 98.00),
 ('fhir_r4', 'Encounter', 'bronze_fhir_encounter', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 95.00),
 ('fhir_r4', 'Observation', 'bronze_fhir_observation', 'Watermark', 'meta_lastUpdated', 'resource_id', 'sample-data/fhir_r4/*.json', 1, 95.00),
@@ -51,7 +51,8 @@ VALUES
 CREATE TABLE dbo.watermark_state (
     source_name             VARCHAR(100) NOT NULL,
     source_table            VARCHAR(100) NOT NULL,
-    watermark_value         VARCHAR(100) NOT NULL,
+    watermark_value         VARCHAR(100) NOT NULL, -- timestamp 'yyyy-MM-dd HH:mm:ss.ffffff' or a 20-char LSN
+    ingestion_type          VARCHAR(30) NOT NULL,  -- the two watermark formats are not comparable
     last_pipeline_run_id    VARCHAR(100) NOT NULL,
     updated_at              DATETIME2 DEFAULT GETUTCDATE(),
     CONSTRAINT pk_watermark_state PRIMARY KEY (source_name, source_table)

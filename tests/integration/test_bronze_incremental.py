@@ -31,8 +31,8 @@ def source_csv(tmp_path_factory):
 @pytest.fixture(scope="module")
 def cfg(source_csv):
     # Absolute source_location: os.path.join(BASE_DIR, abs_path) returns abs_path.
-    # sql_ehr selects the CSV reader; the unique source_table keeps this test's watermark separate.
-    return SourceConfig("sql_ehr", "test_patients", "bronze_test_patients", "Watermark",
+    # claims_csv selects the CSV reader; the unique source_table keeps this test's watermark separate.
+    return SourceConfig("claims_csv", "test_patients", "bronze_test_patients", "Watermark",
                         "updated_at", "patient_id", str(source_csv))
 
 

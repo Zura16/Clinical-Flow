@@ -14,6 +14,10 @@ from pyspark.sql.types import StringType, TimestampType, StructType, StructField
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # CLINICALFLOW_LAKEHOUSE lets tests point every layer at a throwaway directory.
 # It must be set before this module is imported (tests/conftest.py does that).
+# Spark packages fetched on session start: Delta comes from configure_spark_with_delta_pip,
+# the SQL Server JDBC driver is added here so bronze can read CDC changes.
+MSSQL_JDBC_PACKAGE = "com.microsoft.sqlserver:mssql-jdbc:12.8.1.jre11"
+
 LAKEHOUSE_PATH = os.environ.get("CLINICALFLOW_LAKEHOUSE", os.path.join(BASE_DIR, "delta_lakehouse"))
 
 BRONZE_PATH = os.path.join(LAKEHOUSE_PATH, "bronze")
@@ -46,7 +50,7 @@ def get_spark_session(app_name="ClinicalFlow_Lakehouse"):
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     )
-    return configure_spark_with_delta_pip(builder).getOrCreate()
+    return configure_spark_with_delta_pip(builder, extra_packages=[MSSQL_JDBC_PACKAGE]).getOrCreate()
 
 # Hashing helper function for record deduplication and idempotency
 def add_record_hash(df, columns_to_hash, output_col="record_hash"):

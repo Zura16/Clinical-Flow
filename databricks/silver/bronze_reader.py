@@ -4,7 +4,9 @@ Read the current state of a source table out of append-only bronze.
 Bronze holds every version ever landed, one partition per run. Silver wants one row per business
 key, so this module collapses bronze using the table's pipeline_config row:
 
-- Watermark / CDC loads: latest version per primary key (highest watermark, then latest landing).
+- Watermark loads: latest version per primary key (highest watermark, then latest landing).
+- CDC loads: latest change per primary key by log position, then drop keys whose last change was
+  a delete (__$operation = 1). The delete row stays in bronze as the evidence it happened.
 - Full loads: every run is a complete snapshot, so the current state is the newest snapshot.
   A key missing from it was removed at the source; taking the latest-per-key across all
   snapshots would keep it alive forever.
@@ -34,9 +36,22 @@ def latest_snapshot(df: DataFrame) -> DataFrame:
     return df.filter(F.col("_pipeline_run_id") == newest["_pipeline_run_id"])
 
 
+CDC_DELETE = 1
+
+
+def latest_cdc_state(df: DataFrame, key_columns: list[str]) -> DataFrame:
+    w = Window.partitionBy(*key_columns).orderBy(
+        F.col("_cdc_lsn").desc(), F.col("_cdc_seqval").desc(), F.col("_ingested_at").desc()
+    )
+    latest = df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
+    return latest.filter(F.col("_cdc_operation") != CDC_DELETE)
+
+
 def current_state(df: DataFrame, cfg: SourceConfig) -> DataFrame:
     if cfg.ingestion_type == "Full":
         return latest_snapshot(df)
+    if cfg.ingestion_type == "CDC":
+        return latest_cdc_state(df, cfg.primary_keys)
     return latest_per_key(df, cfg.primary_keys, cfg.watermark_column)
 
 
