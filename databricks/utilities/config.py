@@ -47,6 +47,10 @@ def get_spark_session(app_name="ClinicalFlow_Lakehouse"):
         # machine's local zone and watermarks shift by the UTC offset.
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.ui.showConsoleProgress", "false")
+        # The session zone governs Spark; user.timezone governs the JVM (and anything, such as a
+        # JDBC driver, that materialises a zone-less value into a java type).
+        .config("spark.driver.extraJavaOptions", "-Duser.timezone=UTC")
+        .config("spark.executor.extraJavaOptions", "-Duser.timezone=UTC")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     )

@@ -119,14 +119,34 @@ def capture_instance(table: str) -> str:
     return f"dbo_{table}"
 
 
-def business_columns(table: str) -> list[str]:
+# SQL Server's date/time types carry no zone. Letting JDBC materialise them as java.sql.Timestamp
+# applies the JVM's local zone, which silently shifts every value and, across a daylight-saving
+# boundary, shifts two values by different amounts. Converting to ISO-8601 text in SQL keeps the
+# source's own characters: bronze stores what the source said, and silver casts under a UTC session.
+TEXT_CONVERTED_TYPES = {"datetime", "datetime2", "smalldatetime", "date", "time", "datetimeoffset"}
+ISO8601_STYLE = 126
+
+
+def business_columns(table: str) -> list[dict]:
     rows = query(
-        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+        "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
         f"WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION"
     )
     if not rows:
         raise ValueError(f"table dbo.{table} not found in the source database")
-    return [r["COLUMN_NAME"] for r in rows]
+    return rows
+
+
+def select_list(table: str) -> str:
+    """Column list for a CDC or snapshot read, with date/time columns rendered as ISO text."""
+    parts = []
+    for row in business_columns(table):
+        name, data_type = row["COLUMN_NAME"], row["DATA_TYPE"].lower()
+        if data_type in TEXT_CONVERTED_TYPES:
+            parts.append(f"CONVERT(VARCHAR(33), [{name}], {ISO8601_STYLE}) AS [{name}]")
+        else:
+            parts.append(f"[{name}]")
+    return ", ".join(parts)
 
 
 def max_lsn() -> str:
