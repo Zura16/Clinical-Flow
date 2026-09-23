@@ -8,6 +8,7 @@ import uuid
 from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, DoubleType, LongType
 from databricks.utilities.config import SILVER_PATH, GOLD_PATH, get_spark_session, save_df, read_df
+from databricks.gold.silver_reader import read_silver_current
 from databricks.utilities.logger import PipelineLogger
 
 def build_gold_facts(spark=None, run_id=None):
@@ -35,7 +36,7 @@ def build_gold_facts(spark=None, run_id=None):
     silver_enc_path = os.path.join(SILVER_PATH, "silver_ehr_encounters")
     
     if os.path.exists(silver_enc_path):
-        silver_enc = read_df(spark, silver_enc_path)
+        silver_enc = read_silver_current(spark, "silver_ehr_encounters")
         
         fact_enc = (
             silver_enc.alias("enc")
@@ -68,7 +69,7 @@ def build_gold_facts(spark=None, run_id=None):
     silver_obs_path = os.path.join(SILVER_PATH, "silver_fhir_observations")
     
     if os.path.exists(silver_obs_path):
-        silver_obs = read_df(spark, silver_obs_path)
+        silver_obs = read_silver_current(spark, "silver_fhir_observations")
         
         fact_obs = (
             silver_obs.alias("obs")
@@ -94,7 +95,7 @@ def build_gold_facts(spark=None, run_id=None):
     silver_clm_path = os.path.join(SILVER_PATH, "silver_claims")
     
     if os.path.exists(silver_clm_path):
-        silver_clm = read_df(spark, silver_clm_path)
+        silver_clm = read_silver_current(spark, "silver_claims")
         
         fact_clm = (
             silver_clm.alias("clm")

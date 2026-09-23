@@ -10,6 +10,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import LongType, IntegerType, BooleanType, DateType, TimestampType
 from databricks.utilities.config import SILVER_PATH, GOLD_PATH, get_spark_session, add_record_hash, save_df, read_df
+from databricks.gold.silver_reader import read_silver_current
 from databricks.utilities.logger import PipelineLogger
 
 def build_dim_patient(spark, run_id):
@@ -25,9 +26,13 @@ def build_dim_patient(spark, run_id):
     
     dfs = []
     if os.path.exists(ehr_pat_path):
-        dfs.append(read_df(spark, ehr_pat_path))
+        dfs.append(read_silver_current(spark, "silver_ehr_patients"))
     if os.path.exists(fhir_pat_path):
-        dfs.append(read_df(spark, fhir_pat_path).withColumn("ssn_hash", F.lit(None)).withColumn("phone_number", F.lit(None)))
+        # Typed placeholders: an untyped lit(None) is VOID, which Delta cannot store, so the
+        # column would vanish from the written table and break the next run's merge.
+        dfs.append(read_silver_current(spark, "silver_fhir_patients")
+                   .withColumn("ssn_hash", F.lit(None).cast("string"))
+                   .withColumn("phone_number", F.lit(None).cast("string")))
         
     if not dfs:
         print("No Silver patient datasets available for dim_patient.")
@@ -175,7 +180,7 @@ def build_gold_dimensions(spark=None, run_id=None):
     facilities_path = os.path.join(SILVER_PATH, "silver_facilities")
     dim_fac_path = os.path.join(GOLD_PATH, "dim_facility")
     if os.path.exists(facilities_path):
-        fac_df = read_df(spark, facilities_path)
+        fac_df = read_silver_current(spark, "silver_facilities")
         dim_fac = (
             fac_df
             .withColumn("facility_sk", F.monotonically_increasing_id() + 1)
