@@ -29,3 +29,11 @@ Dated journal of what landed. Newest last.
   - Verified: bronze current state reconciles exactly to SQL Server for all six tables (e.g. patients bronze 1,020 rows / current 1,001 = source 1,001 after an insert and a cascading delete).
   - Finding: the second bronze run (0 new rows) is *slower* than the first, because file-based watermark sources still read everything. See decisions.
   - Tests: 13 pass; the CDC test skips when SQL Server isn't running.
+- Fix plan step 4 (silver) landed:
+  - Incremental silver: stage watermarks over bronze `_ingested_at`, batch collapse, Delta MERGE with a version guard.
+  - Soft deletes from both CDC operation 1 and `WHEN NOT MATCHED BY SOURCE` on full snapshots; gold reads current rows through `silver_reader`.
+  - Silver coverage 5 -> 12 tables via declarative specs; `dim_facility` builds for the first time.
+  - Measured: 20,000-row first load, then 7 rows after 5 source changes; 0 rows when nothing changed.
+  - Fixed: untyped `lit(None)` placeholders in `dim_patient` (VOID columns vanish on write, breaking the next run).
+  - Before that: profiled and cut idle-run cost ~20% (config seeding was re-running a MERGE per lookup). The predicted win (skipping empty writes) did nothing; the decisions log records both.
+  - Tests: 17 pass (7 integration, 10 unit).
