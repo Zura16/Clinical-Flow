@@ -108,3 +108,23 @@ Reading and parsing *all* 22 FHIR bundles takes **3.2 s total**, so the six FHIR
 **Bug found on the way:** `dim_patient` added placeholder columns with an untyped `F.lit(None)`. VOID is not storable, so the column silently vanished from the written table and the *second* run failed to resolve it. It only ever appeared on a rerun against an existing table.
 **Not done here:** gold still rebuilds in full; that is step 6 along with stable keys and point-in-time joins.
 **Interview version:** "Silver merges on the business key with a version guard, so replays and out-of-order batches can't regress a record. Deletes are soft, because a hard delete strands the facts that point at the record and destroys the audit trail. After five source changes my silver run reads seven rows instead of twenty thousand."
+
+## 2026-09-22 — Data quality: rules in a table, thresholds that fail the run
+
+**Decision:** `data_quality_rule` holds the checks (seeded from `quality_rules.py`, mirroring the SQL DDL). Adding a check is a row; retiring one is `active_flag = false`. Rule types: NOT_NULL, RANGE, REGEX (row-scoped expressions), UNIQUE (grain), REFERENTIAL (`target_table.target_column`), FRESHNESS (max age in hours).
+**Two independent dials, which is the part worth explaining:**
+- `severity` decides the **row's** fate: CRITICAL/ERROR quarantine it and keep it out of silver; WARNING records the violation and lets the row through.
+- `failure_threshold` decides the **run's** fate: if the failure rate for a rule exceeds it, the run raises and writes a FAILED audit row before anything merges. Identity and grain rules sit at 0; clinical plausibility gets a small allowance; coding and reference checks warn instead of blocking.
+**Quarantine is idempotent:** `quarantine_key = sha256(run_id, dataset, record_id, rule)` merged on that key, so rerunning a batch re-derives the same keys and inserts nothing. The old engine appended, so every rerun duplicated its quarantine rows.
+**Passing rules are recorded too**, in `data_quality_result`. If only failures were written, "no rows today" would be indistinguishable from "the check never ran". That table is what the data-quality dashboard reads.
+**Rules skip soft-deleted rows.** Found by running against real data: the two REFERENTIAL violations were the deleted patient's own encounter deletions, whose parent was already (correctly) gone. A record on its way out does not have to satisfy constraints.
+**Interview version:** "Rules live in a table with two dials: severity decides whether the row is quarantined, threshold decides whether the run fails. Passing checks are recorded as well as failures, because 'no violations' should be a measurement, not silence."
+
+## 2026-09-22 — Finding: a daylight-saving bug the quality rules caught
+
+**Symptom:** the rule `result_timestamp >= order_timestamp` failed for exactly 1 row in 100,027, while `SELECT COUNT(*) ... WHERE result_timestamp < order_timestamp` in SQL Server returned **0**.
+**Cause:** SQL Server's `DATETIME2` carries no zone. The JDBC driver materialises it into a `java.sql.Timestamp` using the **JVM's** default zone — `spark.sql.session.timeZone=UTC` governs Spark, not the driver. 2024-03-10 is US spring-forward: the order at 02:50 was read as PST (UTC-8) and the result at 03:48 as PDT (UTC-7), so a 58-minute gap became **minus two minutes**. Every EHR timestamp was shifted by the local offset; only the row spanning the DST boundary became visibly impossible.
+**Fix:** CDC and snapshot reads `CONVERT(VARCHAR(33), col, 126)` date/time columns to ISO-8601 **text** in SQL. Bronze then stores the source's own characters — consistent with how CSV columns already land — and silver casts under a UTC session. `-Duser.timezone=UTC` is set as well, but the text conversion is the actual fix: it removes the driver's zone from the path entirely.
+**Verified:** silver now reports `2024-03-10 02:50:22` / `03:48:22`, identical to the source, and the violation count is 0.
+**Why this one matters:** the pipeline had been "working" for two steps with every EHR timestamp silently shifted by 7-8 hours. Row counts reconciled perfectly the whole time, because counts cannot see it. A quality rule comparing two columns could.
+**Interview version:** "A data quality rule flagged one lab result as resulted before it was ordered, but the source had none. JDBC was reading zone-less timestamps in the JVM's local zone, and across the daylight-saving boundary two columns shifted by different amounts. I moved the conversion into SQL so bronze stores the source's exact characters. Row-count reconciliation had been green throughout — it can't catch a uniform shift."

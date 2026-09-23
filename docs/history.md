@@ -37,3 +37,11 @@ Dated journal of what landed. Newest last.
   - Fixed: untyped `lit(None)` placeholders in `dim_patient` (VOID columns vanish on write, breaking the next run).
   - Before that: profiled and cut idle-run cost ~20% (config seeding was re-running a MERGE per lookup). The predicted win (skipping empty writes) did nothing; the decisions log records both.
   - Tests: 17 pass (7 integration, 10 unit).
+- Fix plan step 5 (data quality) landed:
+  - Rules moved into `data_quality_rule` (27 seeded); added UNIQUE, REFERENTIAL, REGEX, FRESHNESS.
+  - Severity decides the row (quarantine vs warn), threshold decides the run (raises before merge).
+  - Quarantine keyed by sha256(run, dataset, record, rule) and merged: reruns no longer duplicate.
+  - New `data_quality_result` table records every rule's outcome, passes included.
+  - Rules skip soft-deleted rows (found on real data: the flagged rows were a deleted patient's own deletions).
+  - **Found a daylight-saving bug via a quality rule**: JDBC was reading zone-less SQL Server timestamps in the JVM's local zone, shifting every EHR timestamp and breaking one row across the 2024-03-10 DST boundary. CDC reads now convert date/time columns to ISO text in SQL. Silver timestamps now match the source exactly. See decisions.
+  - Tests: 23 pass (~16 min).
