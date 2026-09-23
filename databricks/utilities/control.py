@@ -143,6 +143,46 @@ def get_source_config(spark: SparkSession, destination_table: str) -> SourceConf
     return matches[0]
 
 
+# Silver tracks how far it has consumed bronze in the same table, keyed by stage rather than by
+# source table. One place answers "how far has each stage got?" for any layer.
+SILVER_STAGE = "silver"
+
+
+def get_stage_watermark(spark: SparkSession, stage: str, table: str) -> str | None:
+    """The last bronze _ingested_at a stage has consumed for this table."""
+    if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
+        return None
+    rows = (
+        spark.read.format("delta").load(WATERMARK_STATE_PATH)
+        .filter((F.col("source_name") == stage) & (F.col("source_table") == table))
+        .select("watermark_value")
+        .collect()
+    )
+    return rows[0]["watermark_value"] if rows else None
+
+
+def advance_stage_watermark(spark: SparkSession, stage: str, table: str, new_value: str, run_id: str) -> None:
+    _merge_watermark(spark, stage, table, new_value, stage, run_id)
+
+
+def _merge_watermark(spark: SparkSession, source_name: str, source_table: str, new_value: str,
+                     ingestion_type: str, run_id: str) -> None:
+    update_df = spark.createDataFrame(
+        [(source_name, source_table, new_value, ingestion_type, run_id)],
+        "source_name STRING, source_table STRING, watermark_value STRING, ingestion_type STRING, last_pipeline_run_id STRING",
+    ).withColumn("updated_at", F.date_format(F.current_timestamp(), "yyyy-MM-dd HH:mm:ss.SSSSSS"))
+
+    if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
+        spark.createDataFrame([], WATERMARK_STATE_SCHEMA).write.format("delta").save(WATERMARK_STATE_PATH)
+    (
+        DeltaTable.forPath(spark, WATERMARK_STATE_PATH).alias("t")
+        .merge(update_df.alias("s"), "t.source_name = s.source_name AND t.source_table = s.source_table")
+        .whenMatchedUpdateAll(condition="s.ingestion_type <> t.ingestion_type OR s.watermark_value > t.watermark_value")
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+
 def get_watermark(spark: SparkSession, cfg: SourceConfig) -> str | None:
     if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
         return None
@@ -170,17 +210,4 @@ def advance_watermark(spark: SparkSession, cfg: SourceConfig, new_value: str, ru
     Both watermark formats are fixed-width and zero-padded (timestamps 'yyyy-MM-dd HH:mm:ss.ffffff',
     LSNs 20 hex characters), so a string comparison orders them the same way the values do.
     """
-    update_df = spark.createDataFrame(
-        [(cfg.source_name, cfg.source_table, new_value, cfg.ingestion_type, run_id)],
-        "source_name STRING, source_table STRING, watermark_value STRING, ingestion_type STRING, last_pipeline_run_id STRING",
-    ).withColumn("updated_at", F.date_format(F.current_timestamp(), "yyyy-MM-dd HH:mm:ss.SSSSSS"))
-
-    if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
-        spark.createDataFrame([], WATERMARK_STATE_SCHEMA).write.format("delta").save(WATERMARK_STATE_PATH)
-    (
-        DeltaTable.forPath(spark, WATERMARK_STATE_PATH).alias("t")
-        .merge(update_df.alias("s"), "t.source_name = s.source_name AND t.source_table = s.source_table")
-        .whenMatchedUpdateAll(condition="s.ingestion_type <> t.ingestion_type OR s.watermark_value > t.watermark_value")
-        .whenNotMatchedInsertAll()
-        .execute()
-    )
+    _merge_watermark(spark, cfg.source_name, cfg.source_table, new_value, cfg.ingestion_type, run_id)

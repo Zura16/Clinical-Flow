@@ -38,6 +38,14 @@ RULES_CATALOG = {
         {"column": "patient_id", "type": "NOT_NULL", "expr": "patient_id IS NOT NULL", "severity": "CRITICAL"},
         {"column": "result_value", "type": "RANGE", "expr": "result_value IS NULL OR (result_value >= -500 AND result_value <= 50000)", "severity": "ERROR"}
     ],
+    "silver_diagnoses": [
+        {"column": "diagnosis_id", "type": "NOT_NULL", "expr": "diagnosis_id IS NOT NULL", "severity": "CRITICAL"},
+        {"column": "icd10_code", "type": "NOT_NULL", "expr": "icd10_code IS NOT NULL", "severity": "ERROR"}
+    ],
+    "silver_lab_results": [
+        {"column": "lab_result_id", "type": "NOT_NULL", "expr": "lab_result_id IS NOT NULL", "severity": "CRITICAL"},
+        {"column": "result_value", "type": "RANGE", "expr": "result_value IS NULL OR (result_value >= -500 AND result_value <= 50000)", "severity": "ERROR"}
+    ],
     "silver_claims": [
         {"column": "claim_id", "type": "NOT_NULL", "expr": "claim_id IS NOT NULL", "severity": "CRITICAL"},
         {"column": "claim_amount", "type": "RANGE", "expr": "claim_amount >= 0", "severity": "ERROR"}
