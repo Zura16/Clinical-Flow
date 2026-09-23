@@ -71,6 +71,7 @@ Cross-cutting: pipeline_config (metadata) · data_quality_rule + quarantine · p
 | Stack (venv) | Python 3.12 · PySpark 4.1.1 · delta-spark 4.3.1 · Java 17 |
 | Current data volume | **~366K records**: EHR 20,000 patients / 39,970 encounters / 39,970 diagnoses / 100,027 lab results / 39,970 medications / 50 providers · FHIR 5,000 patients / 75,732 observations / 12,622 encounters / 12,622 conditions (22 bundle files) · 20,000 claims / 5 facilities |
 | Control tables (DDL) | `pipeline_config`, `data_quality_rule`, `quarantine_records`, `pipeline_run_audit` — `sql/quality/01_data_quality_framework.sql` |
+| Silver tables (12) | EHR: patients 20,000 · encounters/diagnoses/medications 39,970 · lab_results 100,027 · providers 50 · FHIR: patients 5,000 · observations 75,732 · encounters/conditions 12,622 · claims 20,000 · facilities 5 |
 | Canonical checks | Second bronze run lands **0 rows** on all 12 watermark/CDC tables (only the 2 Full tables re-land). Bronze current state reconciles **exactly** to `SELECT COUNT(*)` in SQL Server per table. MedicationRequest/Practitioner are **0** — the generator doesn't emit them. |
 | Timings (~366K records, local) | bronze first run **1:52** · second run **2:11** (slower: file watermark sources still read everything — see decisions) · test suite ~6 min |
 | SQL Server source | `ehr_source` on localhost:1433, CDC on 6 tables, sa password in `.env` (gitignored). JDBC via `com.microsoft.sqlserver:mssql-jdbc:12.8.1.jre11`, control statements via `pymssql`. |
@@ -86,8 +87,8 @@ PYTHONPATH=. venv/bin/python -m scripts.setup_source_db         # schema + CDC +
 PYTHONPATH=. venv/bin/python -m scripts.simulate_source_changes # inserts/updates/deletes for CDC to capture
 venv/bin/python -m databricks.bronze.ingest_raw_data            # bronze (all active pipeline_config rows)
 venv/bin/python -m databricks.bronze.ingest_raw_data --run-id <id> [--source S --table T]  # restart a run: landed tables skipped, failed ones retried
-venv/bin/python -m databricks.silver.process_fhir_silver        # silver (FHIR)
-venv/bin/python -m databricks.silver.process_relational_silver  # silver (EHR + claims)
+venv/bin/python -m databricks.silver.process_fhir_silver        # silver (FHIR, incremental)
+venv/bin/python -m databricks.silver.process_relational_silver  # silver (EHR + claims, incremental)
 venv/bin/python -m databricks.gold.build_dimensions             # gold dims
 venv/bin/python -m databricks.gold.build_facts                  # gold facts
 venv/bin/python -m databricks.utilities.failure_simulation      # failure + recovery demo
@@ -100,7 +101,7 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 - [x] **1. Foundations** — remove commit-automation bot; real Delta (no Parquet fallback); secrets out of compose
 - [x] **2. Real sources** — SQL Server + CDC in Docker, loaded from the generator (or Synthea); scale to 100K+
 - [x] **3. Bronze** — append-only, partitioned, driven by `pipeline_config`, per-source watermarks
-- [ ] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
+- [x] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
 - [ ] **5. Data quality** — rules from `data_quality_rule`, missing rule types, thresholds that fail the run, idempotent quarantine
 - [ ] **6. Gold** — stable SKs, unknown members, point-in-time SCD2 fact joins, missing dims/facts, no fabricated metrics
 - [ ] **7. Failure demo** — a real failure, `FAILED` audit + alert, replay only the failed partition
@@ -110,7 +111,8 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** steps 1 ✅, 2 ✅, 3 ✅ (2026-09-22). **Next: step 4 (silver/gold MERGE)** — the last big correctness gap. Sources are real: SQL Server CDC + FHIR bundles + claims CSV, ~366K records.
-- **Bronze restart semantics (don't regress):** a succeeded run ID is SKIPPED and never re-extracted, because its partition is the only copy of past source versions. A failed run ID is retried from the current watermark. Commit order: write → SUCCESS audit → watermark. See decisions.md, "replay destroyed bronze history".
-- **CDC semantics (don't regress):** LSN watermarks (20 hex chars, string-comparable); snapshot on first load; deletes land in bronze and are dropped by silver's current-state read; a retention gap fails the run rather than skipping changes.
-- **Known issues:** silver/gold still full-overwrite (`save_df` with `overwriteSchema=true`); DQ rules hard-coded; quarantine appends duplicate on rerun; SCD2 SKs unstable and facts join the current version only; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; `dim_facility` never built (no `silver_facilities`); silver only covers patients/encounters/claims/FHIR Patient+Observation — diagnoses, labs, medications, providers land in bronze and stop there. Generator emits no MedicationRequest/Practitioner. Old SA password is in git history and was pushed by the old bot: treat it as burned.
+- **Phase:** steps 1 ✅, 2 ✅, 3 ✅, 4 ✅ (2026-09-22). **Next: step 5 (data-quality rules from the table)**, then 6 (gold), 7 (failure demo), 8 (CI).
+- **Bronze restart semantics (don't regress):** a succeeded run ID is SKIPPED and never re-extracted, because its partition is the only copy of past source versions. A failed run ID is retried from the current watermark. Commit order: write → SUCCESS audit → watermark.
+- **CDC semantics (don't regress):** LSN watermarks (20 hex chars, string-comparable); snapshot on first load; deletes land in bronze; a retention gap fails the run.
+- **Silver semantics (don't regress):** stage watermark over bronze `_ingested_at` (landing time, so retries are picked up); collapse per source key; MERGE with `s._version > t._version` so replays never regress a record; **soft deletes** (`_is_deleted`/`_deleted_at`) from CDC op 1 and from `NOT MATCHED BY SOURCE` on Full snapshots; gold reads through `gold/silver_reader.py`.
+- **Known issues:** gold still full-rebuilds with unstable SKs (`monotonically_increasing_id`) and joins only `is_current` rows; DQ rules hard-coded in `quality_engine.RULES_CATALOG`, no thresholds, quarantine appends duplicate on rerun; fabricated `turnaround_time_minutes`/`is_readmission_30d`; failure demo doesn't fail; `dim_patient` stacks EHR + FHIR patients as 25,000 distinct people (no `source_system` column, no identity resolution); generator emits no MedicationRequest/Practitioner; `advance_watermark` costs ~3.2 s/table (batching not taken); old SA password is burned (in git history, pushed).
