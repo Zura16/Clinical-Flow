@@ -184,7 +184,8 @@ def process_spec(spark: SparkSession, spec: SilverSpec, run_id: str) -> int:
         rejected = 0
         if spec.dq_dataset:
             engine = DataQualityEngine(spark, spec.dq_dataset, run_id)
-            batch, rejected = engine.validate(batch, id_col=spec.key_columns[0])
+            # A threshold breach raises here, so the table fails before anything is merged.
+            batch, rejected, _ = engine.validate(batch, id_col=spec.key_columns[0])
 
         metrics = merge_into_silver(spark, batch, spec, cfg)
         # The watermark moves only once the merge has committed.

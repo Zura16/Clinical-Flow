@@ -84,7 +84,7 @@ def run_failure_simulation():
     )
     
     dq_engine = DataQualityEngine(spark, "silver_observations", run_id_bad)
-    valid_obs, rejected_count = dq_engine.validate(flat_malformed, id_col="observation_id")
+    valid_obs, rejected_count, _ = dq_engine.validate(flat_malformed, id_col="observation_id")
     
     print(f"\n--> Data Quality Engine Action:")
     print(f"    - Input corrupt records: {malformed_df.count()}")

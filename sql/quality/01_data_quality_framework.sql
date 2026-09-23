@@ -59,32 +59,62 @@ CREATE TABLE dbo.watermark_state (
 );
 
 -- 2. Data Quality Rules Table
+-- rule_type decides how rule_expression is read:
+--   NOT_NULL / RANGE / REGEX -> boolean SQL expression, evaluated per row
+--   UNIQUE                   -> comma-separated columns forming the grain
+--   REFERENTIAL              -> target_table.target_column the value must exist in
+--   FRESHNESS                -> maximum age in hours for the column's newest value
+-- severity: CRITICAL/ERROR quarantine the row and keep it out of silver; WARNING records only.
+-- failure_threshold: share of the batch (percent) allowed to fail before the RUN fails.
 CREATE TABLE dbo.data_quality_rule (
     rule_id              INT IDENTITY(1,1) PRIMARY KEY,
     dataset_name         VARCHAR(100) NOT NULL,
     column_name          VARCHAR(100) NOT NULL,
-    rule_type            VARCHAR(50) NOT NULL, -- NOT_NULL, REFERENTIAL, RANGE, UNIQUE, FRESHNESS, REGEX
+    rule_type            VARCHAR(50) NOT NULL,
     rule_expression      VARCHAR(1000) NOT NULL,
-    severity             VARCHAR(20) NOT NULL, -- ERROR, WARNING, CRITICAL
+    severity             VARCHAR(20) NOT NULL,
     failure_threshold    DECIMAL(5,2) DEFAULT 5.00,
     active_flag          BIT DEFAULT 1,
-    created_at           DATETIME2 DEFAULT GETUTCDATE()
+    created_at           DATETIME2 DEFAULT GETUTCDATE(),
+    CONSTRAINT uq_data_quality_rule UNIQUE (dataset_name, column_name, rule_type)
 );
 
--- Seed data quality rules
+-- Mirrors DATA_QUALITY_RULE_SEED in databricks/utilities/quality_rules.py.
 INSERT INTO dbo.data_quality_rule (dataset_name, column_name, rule_type, rule_expression, severity, failure_threshold, active_flag)
 VALUES
 ('silver_patients', 'patient_id', 'NOT_NULL', 'patient_id IS NOT NULL', 'CRITICAL', 0.00, 1),
+('silver_patients', 'patient_id', 'UNIQUE', 'patient_id', 'CRITICAL', 0.00, 1),
+('silver_patients', 'date_of_birth', 'NOT_NULL', 'date_of_birth IS NOT NULL', 'ERROR', 5.00, 1),
+('silver_patients', 'date_of_birth', 'RANGE', 'date_of_birth IS NULL OR date_of_birth <= current_date()', 'ERROR', 0.00, 1),
+('silver_encounters', 'encounter_id', 'NOT_NULL', 'encounter_id IS NOT NULL', 'CRITICAL', 0.00, 1),
+('silver_encounters', 'encounter_id', 'UNIQUE', 'encounter_id', 'CRITICAL', 0.00, 1),
 ('silver_encounters', 'patient_id', 'NOT_NULL', 'patient_id IS NOT NULL', 'CRITICAL', 0.00, 1),
 ('silver_encounters', 'discharge_timestamp', 'RANGE', 'discharge_timestamp IS NULL OR discharge_timestamp >= admission_timestamp', 'ERROR', 1.00, 1),
+('silver_encounters', 'patient_id', 'REFERENTIAL', 'silver_ehr_patients.patient_id', 'WARNING', 5.00, 1),
+('silver_observations', 'observation_id', 'NOT_NULL', 'observation_id IS NOT NULL', 'CRITICAL', 0.00, 1),
+('silver_observations', 'observation_id', 'UNIQUE', 'observation_id', 'CRITICAL', 0.00, 1),
+('silver_observations', 'patient_id', 'NOT_NULL', 'patient_id IS NOT NULL', 'CRITICAL', 0.00, 1),
 ('silver_observations', 'result_value', 'RANGE', 'result_value IS NULL OR (result_value >= -500 AND result_value <= 50000)', 'ERROR', 2.00, 1),
-('silver_observations', 'observation_timestamp', 'RANGE', 'observation_timestamp <= CURRENT_TIMESTAMP()', 'ERROR', 0.50, 1),
+('silver_observations', 'observation_timestamp', 'RANGE', 'observation_timestamp IS NULL OR observation_timestamp <= current_timestamp()', 'ERROR', 0.50, 1),
+('silver_observations', 'loinc_code', 'REGEX', 'loinc_code IS NULL OR loinc_code RLIKE ''^[0-9]{1,5}-[0-9]$''', 'WARNING', 5.00, 1),
+('silver_diagnoses', 'diagnosis_id', 'NOT_NULL', 'diagnosis_id IS NOT NULL', 'CRITICAL', 0.00, 1),
+('silver_diagnoses', 'icd10_code', 'NOT_NULL', 'icd10_code IS NOT NULL', 'ERROR', 0.00, 1),
+('silver_diagnoses', 'icd10_code', 'REGEX', 'icd10_code IS NULL OR icd10_code RLIKE ''^[A-TV-Z][0-9][0-9AB]''', 'WARNING', 5.00, 1),
+('silver_lab_results', 'lab_result_id', 'NOT_NULL', 'lab_result_id IS NOT NULL', 'CRITICAL', 0.00, 1),
+('silver_lab_results', 'lab_result_id', 'UNIQUE', 'lab_result_id', 'CRITICAL', 0.00, 1),
+('silver_lab_results', 'result_value', 'RANGE', 'result_value IS NULL OR (result_value >= -500 AND result_value <= 50000)', 'ERROR', 2.00, 1),
+('silver_lab_results', 'result_timestamp', 'RANGE', 'result_timestamp IS NULL OR result_timestamp >= order_timestamp', 'ERROR', 1.00, 1),
+('silver_lab_results', 'result_timestamp', 'FRESHNESS', '43800', 'WARNING', 0.00, 1),
+('silver_claims', 'claim_id', 'NOT_NULL', 'claim_id IS NOT NULL', 'CRITICAL', 0.00, 1),
+('silver_claims', 'claim_id', 'UNIQUE', 'claim_id', 'CRITICAL', 0.00, 1),
 ('silver_claims', 'claim_amount', 'RANGE', 'claim_amount >= 0', 'ERROR', 1.00, 1),
-('silver_diagnoses', 'icd10_code', 'NOT_NULL', 'icd10_code IS NOT NULL', 'ERROR', 0.00, 1);
+('silver_claims', 'paid_amount', 'RANGE', 'paid_amount IS NULL OR claim_amount IS NULL OR paid_amount <= claim_amount', 'WARNING', 5.00, 1);
 
 -- 3. Quarantine Table for Failed Records
+-- quarantine_key = sha256(run_id, dataset, record_id, rule): rerunning a batch re-derives the same
+-- key, so the insert is a no-op instead of a duplicate.
 CREATE TABLE dbo.quarantine_records (
-    quarantine_id        INT IDENTITY(1,1) PRIMARY KEY,
+    quarantine_key       CHAR(64) NOT NULL PRIMARY KEY,
     pipeline_run_id      VARCHAR(100) NOT NULL,
     source_name          VARCHAR(100) NOT NULL,
     record_identifier    VARCHAR(255) NOT NULL,
@@ -93,6 +123,23 @@ CREATE TABLE dbo.quarantine_records (
     raw_payload          NVARCHAR(MAX) NOT NULL,
     detected_timestamp   DATETIME2 DEFAULT GETUTCDATE(),
     resolution_status    VARCHAR(30) DEFAULT 'PENDING' -- PENDING, REPLAYED, IGNORED
+);
+
+-- 3b. Per-run rule outcomes, including the rules that passed: "no violations" should be a
+-- measurement, not an absence of evidence. Feeds the data-quality dashboard.
+CREATE TABLE dbo.data_quality_result (
+    result_key             CHAR(64) NOT NULL PRIMARY KEY,
+    pipeline_run_id        VARCHAR(100) NOT NULL,
+    dataset_name           VARCHAR(100) NOT NULL,
+    rule_name              VARCHAR(255) NOT NULL,
+    rule_type              VARCHAR(50) NOT NULL,
+    severity               VARCHAR(20) NOT NULL,
+    rows_checked           BIGINT NOT NULL,
+    rows_failed            BIGINT NOT NULL,
+    failure_rate_pct       DECIMAL(9,4) NOT NULL,
+    failure_threshold_pct  DECIMAL(5,2) NOT NULL,
+    passed                 BIT NOT NULL,
+    checked_at             DATETIME2 DEFAULT GETUTCDATE()
 );
 
 -- 4. Pipeline Run Audit & Lineage Table
