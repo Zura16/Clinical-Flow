@@ -1,11 +1,22 @@
-import pytest
 import os
+
+import pytest
+
+from databricks.utilities import sqlserver as mssql
 from databricks.utilities.config import get_spark_session, GOLD_PATH, read_df
 from databricks.bronze.ingest_raw_data import run_bronze_ingestion
 from databricks.silver.process_fhir_silver import process_fhir_to_silver
 from databricks.silver.process_relational_silver import process_relational_to_silver
 from databricks.gold.build_dimensions import build_gold_dimensions
 from databricks.gold.build_facts import build_gold_facts
+
+# The EHR tables come from SQL Server, so the whole-pipeline test needs it running:
+#     docker compose up -d sqlserver && python -m scripts.setup_source_db
+pytestmark = pytest.mark.skipif(
+    not mssql.is_available(),
+    reason="SQL Server is not available, so bronze cannot ingest the EHR tables",
+)
+
 
 @pytest.fixture(scope="module")
 def spark():
