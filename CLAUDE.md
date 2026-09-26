@@ -71,6 +71,7 @@ Cross-cutting: pipeline_config (metadata) · data_quality_rule + quarantine · p
 | Stack (venv) | Python 3.12 · PySpark 4.1.1 · delta-spark 4.3.1 · Java 17 |
 | Current data volume | **~366K records**: EHR 20,000 patients / 39,970 encounters / 39,970 diagnoses / 100,027 lab results / 39,970 medications / 50 providers · FHIR 5,000 patients / 75,732 observations / 12,622 encounters / 12,622 conditions (22 bundle files) · 20,000 claims / 5 facilities |
 | Control tables (DDL) | `pipeline_config`, `data_quality_rule`, `quarantine_records`, `pipeline_run_audit` — `sql/quality/01_data_quality_framework.sql` |
+| Gold tables (12) | dims: patient (SCD2, 25,001 versions incl. unknown) · provider 51 · facility 6 · diagnosis 9 · medication 7 · department 11 · date 4,019 · facts: encounter 39,952 · observation 175,725 · diagnosis 39,952 · medication_order 39,952 · claim 20,000 |
 | Silver tables (12) | EHR: patients 20,000 · encounters/diagnoses/medications 39,970 · lab_results 100,027 · providers 50 · FHIR: patients 5,000 · observations 75,732 · encounters/conditions 12,622 · claims 20,000 · facilities 5 |
 | Canonical checks | Second bronze run lands **0 rows** on all 12 watermark/CDC tables (only the 2 Full tables re-land). Bronze current state reconciles **exactly** to `SELECT COUNT(*)` in SQL Server per table. MedicationRequest/Practitioner are **0** — the generator doesn't emit them. |
 | Timings (~366K records, local) | bronze first run **1:52** · second run **2:11** (slower: file watermark sources still read everything — see decisions) · test suite ~6 min |
@@ -103,7 +104,7 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 - [x] **3. Bronze** — append-only, partitioned, driven by `pipeline_config`, per-source watermarks
 - [x] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
 - [x] **5. Data quality** — rules from `data_quality_rule`, missing rule types, thresholds that fail the run, idempotent quarantine
-- [ ] **6. Gold** — stable SKs, unknown members, point-in-time SCD2 fact joins, missing dims/facts, no fabricated metrics
+- [x] **6. Gold** — stable SKs, unknown members, point-in-time SCD2 fact joins, missing dims/facts, no fabricated metrics
 - [ ] **7. Failure demo** — a real failure, `FAILED` audit + alert, replay only the failed partition
 - [ ] **8. Tests + CI** — behavior-asserting tests on a temp lakehouse; GitHub Actions running lint + tests
 
@@ -111,8 +112,9 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** steps 1-5 ✅ (2026-09-22). **Next: step 6 (gold)** — stable hash SKs, unknown members, point-in-time joins, remove fabricated metrics, add `source_system` to `dim_patient`. Then 7 (failure demo), 8 (CI).
-- **Bronze semantics (don't regress):** succeeded run ID is SKIPPED, never re-extracted; failed run ID retries from the current watermark; commit order write → SUCCESS audit → watermark. CDC uses LSN watermarks; retention gaps fail the run. **SQL Server date/time columns are converted to ISO text in SQL** — never let JDBC apply the JVM's zone (see the DST finding).
-- **Silver semantics (don't regress):** stage watermark over bronze `_ingested_at`; collapse per source key; MERGE guarded by `s._version > t._version`; soft deletes (`_is_deleted`/`_deleted_at`); gold reads via `gold/silver_reader.py`.
-- **Quality semantics (don't regress):** rules from `data_quality_rule`; severity decides the row, threshold decides the run; quarantine merged on `quarantine_key` (idempotent); every rule's outcome written to `data_quality_result`; soft-deleted rows are skipped.
-- **Known issues:** gold still full-rebuilds with unstable SKs (`monotonically_increasing_id`), joins only `is_current` rows, has no unknown member, and carries fabricated `turnaround_time_minutes`/`is_readmission_30d`; `dim_patient` stacks EHR + FHIR patients as 25,000 distinct people (no `source_system`); failure demo doesn't fail; generator emits no MedicationRequest/Practitioner; `advance_watermark` ~3.2 s/table; full suite ~16 min; old SA password is burned (in git history, pushed).
+- **Phase:** steps 1-6 ✅ (2026-09-26). **Next: step 7 (failure demo that actually fails)**, then 8 (CI + Delta maintenance).
+- **Bronze semantics (don't regress):** succeeded run ID is SKIPPED, never re-extracted; failed run ID retries from the current watermark; write → SUCCESS audit → watermark. CDC uses LSN watermarks; retention gaps fail the run. **SQL Server date/time columns convert to ISO text in SQL** — never let JDBC apply the JVM's zone.
+- **Silver semantics (don't regress):** stage watermark over bronze `_ingested_at`; collapse per source key; MERGE guarded by `s._version > t._version`; soft deletes; gold reads via `gold/silver_reader.py`.
+- **Quality semantics (don't regress):** rules from `data_quality_rule`; severity decides the row, threshold decides the run; quarantine merged on `quarantine_key`; results written for passes too; soft-deleted rows skipped.
+- **Gold semantics (don't regress):** SKs are `xxhash64` of the natural key (never a counter); unknown member `-1` in every dimension; dim_patient versions are contiguous and the first opens at **1900-01-01**; facts join **point-in-time**, never `is_current`; measures are computed or NULL, never filler. `build_dim_patient` must keep `localCheckpoint` before writing (see the lineage trap in decisions).
+- **Known issues:** failure demo doesn't fail (step 7); no CI; no Delta compaction/VACUUM; `advance_watermark` ~3.2 s/table; readmission rate is 39.5% because the generator spaces encounters 1-60 days apart — the metric is right, the synthetic data isn't clinically realistic; generator emits no MedicationRequest/Practitioner; EHR/FHIR patients are separate members (no identity resolution); full suite ~10 min; old SA password is burned (in git history, pushed). Docker Desktop stops on its own here — restart it before a run that needs SQL Server.

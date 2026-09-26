@@ -45,3 +45,15 @@ Dated journal of what landed. Newest last.
   - Rules skip soft-deleted rows (found on real data: the flagged rows were a deleted patient's own deletions).
   - **Found a daylight-saving bug via a quality rule**: JDBC was reading zone-less SQL Server timestamps in the JVM's local zone, shifting every EHR timestamp and breaking one row across the 2024-03-10 DST boundary. CDC reads now convert date/time columns to ISO text in SQL. Silver timestamps now match the source exactly. See decisions.
   - Tests: 23 pass (~16 min).
+
+## 2026-09-26
+
+- Fix plan step 6 (gold) landed:
+  - Deterministic `xxhash64` surrogate keys (stable across rebuilds); unknown member (-1) in every dimension.
+  - New dimensions: provider, diagnosis, medication, department; `dim_facility` now has a source.
+  - dim_patient is real SCD2: contiguous version windows, first version opens at 1900-01-01, deletions open a version, `source_system` distinguishes EHR from FHIR members.
+  - Facts join point-in-time and merge on business key; new `fact_diagnosis` and `fact_medication_order`; `fact_observation` covers EHR labs + FHIR observations.
+  - Fabricated measures removed: turnaround computed from order-to-result (232 distinct values, was hard-coded 15), readmission computed from each patient's previous discharge.
+  - Verified at ~316k fact rows: 0 orphans, 0 NULL keys, 0 unknown members; a moved patient's old encounters still resolve to the pre-move version.
+  - Three bugs found and fixed (first-version dating, an SCD2 lineage trap that inserted nothing, a test clobbering shared silver). See decisions.
+  - Tests: 30 pass (~10 min). The whole-pipeline test now skips when SQL Server is down.
