@@ -9,7 +9,6 @@ only the changed rows, carries deletes, and does not re-read the unchanged ones.
 """
 
 import argparse
-import time
 import uuid
 
 from databricks.utilities import sqlserver as mssql
@@ -56,15 +55,7 @@ def apply_changes(patients: int = 5) -> dict:
 
 
 def wait_for_capture(timeout_seconds: int = 90) -> str:
-    """Wait for the capture job to move the max LSN past where it was before the changes."""
-    before = mssql.max_lsn()
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        current = mssql.max_lsn()
-        if current and current != before:
-            return current
-        time.sleep(3)
-    return mssql.max_lsn()
+    return mssql.wait_for_capture(timeout_seconds=timeout_seconds)
 
 
 if __name__ == "__main__":

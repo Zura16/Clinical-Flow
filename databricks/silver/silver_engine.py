@@ -37,8 +37,9 @@ from databricks.utilities.control import (
     get_source_config,
     get_stage_watermark,
 )
+from databricks.utilities.alerting import raise_alert
 from databricks.utilities.logger import PipelineLogger
-from databricks.utilities.quality_engine import DataQualityEngine
+from databricks.utilities.quality_engine import DataQualityEngine, DataQualityThresholdError
 
 WATERMARK_FORMAT = "yyyy-MM-dd HH:mm:ss.SSSSSS"
 CDC_DELETE = 1
@@ -206,6 +207,14 @@ def process_spec(spark: SparkSession, spec: SilverSpec, run_id: str) -> int:
     except Exception as exc:
         logger.log_run(watermark_start=since, status="FAILED",
                        error_code=type(exc).__name__, error_message=str(exc)[:2000])
+        if isinstance(exc, DataQualityThresholdError):
+            next_step = (f"inspect quarantine_records and data_quality_result for run {run_id}, fix the "
+                         f"source or the rule, then rerun this table: the stage watermark did not move, "
+                         f"so the same bronze batch is reprocessed")
+        else:
+            next_step = f"see pipeline_run_audit for run {run_id}; rerunning reprocesses the same bronze batch"
+        raise_alert(spark, run_id, pipeline_name, summary=f"{type(exc).__name__}: {str(exc)[:300]}",
+                    detail=f"silver table {spec.name} from bronze {spec.bronze_table}", next_step=next_step)
         raise
 
 

@@ -32,6 +32,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from databricks.utilities import sqlserver as mssql
+from databricks.utilities.alerting import raise_alert
 from databricks.utilities.config import BASE_DIR, BRONZE_PATH, get_spark_session
 from databricks.utilities.control import SourceConfig, advance_watermark, get_watermark, load_source_configs
 from databricks.utilities.logger import AUDIT_TABLE_PATH, PipelineLogger
@@ -102,7 +103,7 @@ def read_cdc_increment(spark: SparkSession, cfg: SourceConfig, wm_start: str | N
     to_lsn = mssql.max_lsn()
     if to_lsn is None:
         raise ValueError("SQL Server returned no max LSN: is the SQL Agent running and CDC enabled?")
-    columns = ", ".join(f"[{c}]" for c in mssql.business_columns(table))
+    columns = mssql.select_list(table)
 
     if wm_start is None:
         sql = (f"SELECT '{to_lsn}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
@@ -271,6 +272,13 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         return rows
     except Exception as exc:
         logger.log_run(watermark_start=wm_start, status="FAILED", error_code=type(exc).__name__, error_message=str(exc)[:2000])
+        raise_alert(
+            spark, run_id, pipeline_name,
+            summary=f"{type(exc).__name__}: {str(exc)[:300]}",
+            detail=f"bronze table {cfg.destination_table} from {cfg.source_name}.{cfg.source_table}",
+            next_step=(f"fix the cause, then rerun with --run-id {run_id}: tables this run already landed "
+                       f"are skipped and this one resumes from the current watermark"),
+        )
         raise
 
 

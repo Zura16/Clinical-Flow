@@ -9,6 +9,7 @@ Connection settings come from the environment (.env is read if present); nothing
 """
 
 import os
+import time
 from contextlib import contextmanager
 
 import pymssql
@@ -159,6 +160,23 @@ def min_lsn(table: str) -> str:
 
 def increment_lsn(lsn: str) -> str:
     return scalar(f"SELECT CONVERT(CHAR(20), sys.fn_cdc_increment_lsn(CONVERT(BINARY(10), '{lsn}', 2)), 2)")
+
+
+def wait_for_capture(before: str | None = None, timeout_seconds: int = 120) -> str:
+    """Wait for the CDC capture job to advance past `before`.
+
+    Capture is asynchronous (a SQL Agent job polling the log), so a write is not immediately
+    visible to fn_cdc_get_all_changes. Anything that changes the source and then ingests has to
+    wait, or it will read an empty change set and move the watermark past the change.
+    """
+    start = before if before is not None else max_lsn()
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        current = max_lsn()
+        if current and current != start:
+            return current
+        time.sleep(3)
+    return max_lsn()
 
 
 def cdc_enabled_tables() -> list[str]:
