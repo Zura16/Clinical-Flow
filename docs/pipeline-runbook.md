@@ -35,7 +35,16 @@ To disable a source, set `active_flag = false` on its `pipeline_config` row. Res
 
 Date-range backfill from the source *(planned)*.
 
-## 4. Runbook SLA & Metrics Monitoring
+## 4. Failure and Recovery Demonstration
+Corrupts 500 lab results at source, fails a real quality gate, shows the evidence, repairs the
+source, replays the stage, and verifies nothing was duplicated or lost:
+```bash
+python -m databricks.utilities.failure_simulation --bad-rows 500
+```
+It repairs the source even if it aborts part way. `docs/troubleshooting-guide.md` walks the same
+path as an on-call procedure.
+
+## 5. Runbook SLA & Metrics Monitoring
 - **Ingestion SLA**: Bronze landing within 30 minutes of extraction.
 - **Data Quality SLA**: Rejection rate must remain below 5.0%.
 - **Quarantine Review**: Alerts trigger when `quarantine_records` count increases by > 100 records in a single run.
