@@ -125,6 +125,26 @@ def _record_results(spark: SparkSession, results: list[dict]) -> None:
     )
 
 
+def mark_quarantine_replayed(spark: SparkSession, run_id: str, record_ids: list[str] | None = None) -> int:
+    """Close out quarantined records once their cause is fixed and the batch has been reprocessed.
+
+    The status column documents a lifecycle (PENDING -> REPLAYED / IGNORED); leaving everything
+    PENDING forever makes the table a pile rather than a queue, and nobody can tell which rejections
+    are still outstanding.
+    """
+    if not DeltaTable.isDeltaTable(spark, QUARANTINE_TABLE_PATH):
+        return 0
+    table = DeltaTable.forPath(spark, QUARANTINE_TABLE_PATH)
+    condition = F.col("pipeline_run_id") == run_id
+    if record_ids is not None:
+        condition = condition & F.col("record_identifier").isin(record_ids)
+    pending = table.toDF().filter(condition & (F.col("resolution_status") == "PENDING")).count()
+    if pending:
+        table.update(condition & (F.col("resolution_status") == "PENDING"),
+                     {"resolution_status": F.lit("REPLAYED")})
+    return pending
+
+
 class DataQualityEngine:
     def __init__(self, spark: SparkSession, dataset_name: str, pipeline_run_id: str):
         self.spark = spark
