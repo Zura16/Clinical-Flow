@@ -57,3 +57,9 @@ Dated journal of what landed. Newest last.
   - Verified at ~316k fact rows: 0 orphans, 0 NULL keys, 0 unknown members; a moved patient's old encounters still resolve to the pre-move version.
   - Three bugs found and fixed (first-version dating, an SCD2 lineage trap that inserted nothing, a test clobbering shared silver). See decisions.
   - Tests: 30 pass (~10 min). The whole-pipeline test now skips when SQL Server is down.
+- Fix plan step 7 (failure and recovery) landed:
+  - `pipeline_alert` table + `raise_alert`: printed alert, recorded row, optional webhook; wired into the bronze and silver failure paths. Alerting can never mask the failure it reports.
+  - `failure_simulation.py` rewritten: corrupts 500 lab results in SQL Server, CDC carries them, silver fails a real threshold, evidence is shown (FAILED audit, alert, quarantine, rule results), the source is repaired, the stage replays, and six checks verify nothing was duplicated or lost. Self-cleaning on abort.
+  - Recovery needs no replay command: the stage watermark does not advance on failure, so a rerun reprocesses the same bronze batch.
+  - `troubleshooting-guide.md` rewritten as five real on-call scenarios (threshold breach, bronze failure, CDC retention gap, schema drift, timestamp confusion).
+  - New integration test covers fail -> evidence -> fix -> replay -> no duplicates without needing SQL Server.

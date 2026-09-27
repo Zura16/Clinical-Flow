@@ -76,6 +76,7 @@ Cross-cutting: pipeline_config (metadata) · data_quality_rule + quarantine · p
 | Canonical checks | Second bronze run lands **0 rows** on all 12 watermark/CDC tables (only the 2 Full tables re-land). Bronze current state reconciles **exactly** to `SELECT COUNT(*)` in SQL Server per table. MedicationRequest/Practitioner are **0** — the generator doesn't emit them. |
 | Timings (~366K records, local) | bronze first run **1:52** · second run **2:11** (slower: file watermark sources still read everything — see decisions) · test suite ~6 min |
 | SQL Server source | `ehr_source` on localhost:1433, CDC on 6 tables, sa password in `.env` (gitignored). JDBC via `com.microsoft.sqlserver:mssql-jdbc:12.8.1.jre11`, control statements via `pymssql`. |
+| Alerting | `metadata/pipeline_alert`; optional `CLINICALFLOW_ALERT_WEBHOOK` env var |
 | Control / metadata tables | `metadata/{pipeline_config (14 rows), data_quality_rule (27 rules), watermark_state, pipeline_run_audit, quarantine_records, data_quality_result}` |
 | Bronze layout | `bronze/<destination_table>`, partitioned `_ingest_date`/`_pipeline_run_id`; audit statuses `SUCCESS`/`FAILED`/`SKIPPED` |
 
@@ -92,7 +93,7 @@ venv/bin/python -m databricks.silver.process_fhir_silver        # silver (FHIR, 
 venv/bin/python -m databricks.silver.process_relational_silver  # silver (EHR + claims, incremental)
 venv/bin/python -m databricks.gold.build_dimensions             # gold dims
 venv/bin/python -m databricks.gold.build_facts                  # gold facts
-venv/bin/python -m databricks.utilities.failure_simulation      # failure + recovery demo
+venv/bin/python -m databricks.utilities.failure_simulation      # failure + recovery demo (corrupts 500 source rows, self-repairing)
 venv/bin/python -m pytest tests/ -q                             # tests
 venv/bin/ruff check . && venv/bin/black --check .               # lint
 ```
@@ -105,16 +106,17 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 - [x] **4. Silver** — incremental `MERGE` on business key + hash, CDC deletes, all FHIR resources + EHR tables, explicit schemas
 - [x] **5. Data quality** — rules from `data_quality_rule`, missing rule types, thresholds that fail the run, idempotent quarantine
 - [x] **6. Gold** — stable SKs, unknown members, point-in-time SCD2 fact joins, missing dims/facts, no fabricated metrics
-- [ ] **7. Failure demo** — a real failure, `FAILED` audit + alert, replay only the failed partition
+- [x] **7. Failure demo** — a real failure, `FAILED` audit + alert, replay only the failed partition
 - [ ] **8. Tests + CI** — behavior-asserting tests on a temp lakehouse; GitHub Actions running lint + tests
 
 ## Current status
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** steps 1-6 ✅ (2026-09-26). **Next: step 7 (failure demo that actually fails)**, then 8 (CI + Delta maintenance).
-- **Bronze semantics (don't regress):** succeeded run ID is SKIPPED, never re-extracted; failed run ID retries from the current watermark; write → SUCCESS audit → watermark. CDC uses LSN watermarks; retention gaps fail the run. **SQL Server date/time columns convert to ISO text in SQL** — never let JDBC apply the JVM's zone.
+- **Phase:** steps 1-7 ✅ (2026-09-26). **Next: step 8 (CI + lint + Delta maintenance)** — the last item. ruff/black are **not installed** yet and there is no `requirements-dev.txt`.
+- **Bronze semantics (don't regress):** succeeded run ID is SKIPPED, never re-extracted; failed run ID retries from the current watermark; write → SUCCESS audit → watermark. LSN watermarks for CDC; retention gaps fail the run. SQL Server date/time columns convert to ISO text **in SQL** — never let JDBC apply the JVM's zone.
 - **Silver semantics (don't regress):** stage watermark over bronze `_ingested_at`; collapse per source key; MERGE guarded by `s._version > t._version`; soft deletes; gold reads via `gold/silver_reader.py`.
 - **Quality semantics (don't regress):** rules from `data_quality_rule`; severity decides the row, threshold decides the run; quarantine merged on `quarantine_key`; results written for passes too; soft-deleted rows skipped.
-- **Gold semantics (don't regress):** SKs are `xxhash64` of the natural key (never a counter); unknown member `-1` in every dimension; dim_patient versions are contiguous and the first opens at **1900-01-01**; facts join **point-in-time**, never `is_current`; measures are computed or NULL, never filler. `build_dim_patient` must keep `localCheckpoint` before writing (see the lineage trap in decisions).
-- **Known issues:** failure demo doesn't fail (step 7); no CI; no Delta compaction/VACUUM; `advance_watermark` ~3.2 s/table; readmission rate is 39.5% because the generator spaces encounters 1-60 days apart — the metric is right, the synthetic data isn't clinically realistic; generator emits no MedicationRequest/Practitioner; EHR/FHIR patients are separate members (no identity resolution); full suite ~10 min; old SA password is burned (in git history, pushed). Docker Desktop stops on its own here — restart it before a run that needs SQL Server.
+- **Gold semantics (don't regress):** `xxhash64` SKs (never a counter); unknown member `-1` everywhere; dim_patient versions contiguous, first opens **1900-01-01**; facts join **point-in-time**; measures computed or NULL. Keep `localCheckpoint` in `build_dim_patient`.
+- **Recovery semantics (don't regress):** a failed stage leaves silver untouched and the watermark unmoved — that is what makes a rerun reprocess the same batch. There is deliberately no "replay partition" command. Alerting must never mask the exception.
+- **Known issues:** no CI, no lint config, no Delta compaction/VACUUM (step 8); `advance_watermark` ~3.2 s/table; readmission rate 39.5% because the generator spaces encounters 1-60 days apart (metric right, data unrealistic); generator emits no MedicationRequest/Practitioner; EHR/FHIR patients are separate members (no identity resolution); full suite ~12 min; old SA password is burned (in git history, pushed). Docker Desktop stops on its own here — restart before a run that needs SQL Server.
