@@ -1,0 +1,54 @@
+name: Nightly integration (SQL Server + CDC)
+
+# The CDC path needs a real SQL Server, which is too slow for every push: this runs nightly and on
+# demand. It is the only place the CDC and whole-pipeline tests actually execute rather than skip.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  cdc:
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ secrets.MSSQL_SA_PASSWORD || 'Ci-Local-Str0ng!' }}
+          MSSQL_PID: Developer
+          # CDC's capture and cleanup are SQL Agent jobs: without the Agent, nothing is captured.
+          MSSQL_AGENT_ENABLED: "true"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1'"
+          --health-interval=10s --health-timeout=5s --health-retries=20 --health-start-period=60s
+    env:
+      MSSQL_SA_PASSWORD: ${{ secrets.MSSQL_SA_PASSWORD || 'Ci-Local-Str0ng!' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ivy2
+          key: ivy-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Generate a small dataset
+        run: python sample-data/generate_clinical_data.py --ehr-patients 500 --fhir-patients 100 --claims 500
+      - name: Load SQL Server
+        # The service container cannot mount the workspace, so the loader falls back to row inserts
+        # when /data is absent (see scripts/setup_source_db.py).
+        run: python -m scripts.setup_source_db
+      - name: Tests (CDC tests now run instead of skipping)
+        run: python -m pytest tests -q -rs
+      - name: Failure and recovery demonstration
+        run: python -m databricks.utilities.failure_simulation --bad-rows 50
