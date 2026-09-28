@@ -1,0 +1,44 @@
+# Lint and format configuration. Deliberately small: rules that catch real mistakes, not style
+# opinions, since the repo is read as much as it is run.
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["venv", "delta_lakehouse", "sample-data/fhir_r4"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes: undefined names, unused imports
+    "I",        # import order
+    "B",        # bugbear: mutable defaults, assert-in-production, except-pass
+    "UP",       # pyupgrade
+    "SIM",      # obvious simplifications
+    "C4",       # comprehension misuse
+    "RET",      # unreachable/needless returns
+    "ARG",      # unused arguments
+    "PTH",      # os.path where pathlib is clearer
+    "T20",      # print()
+]
+ignore = [
+    # The pipeline modules are jobs, not libraries: print() IS their progress reporting, and the
+    # runbook quotes those lines. Structured logging would be the deployment answer.
+    "T201",
+    # os.path is used throughout for lakehouse paths and reads fine; switching to pathlib would be
+    # churn without a correctness gain.
+    "PTH100", "PTH103", "PTH107", "PTH110", "PTH112", "PTH113", "PTH118", "PTH120", "PTH123", "PTH202", "PTH208",
+    "E501",  # line length is enforced by black, which knows when it cannot split a line
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on internals and take fixtures they do not all use.
+"tests/*" = ["ARG001", "ARG002", "S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Quieten the deprecation noise from dependencies so a real warning is visible.
+filterwarnings = ["ignore::DeprecationWarning:pyspark.*"]
