@@ -4,13 +4,19 @@ Create the EHR source database, enable CDC, and bulk-load the generated extracts
 
     python -m scripts.setup_source_db [--reset]
 
-Loads with BULK INSERT from /data (sample-data/ mounted into the container), which keeps the
-load fast enough to scale. Order follows the foreign keys. CDC is enabled *before* the load, so
-the initial rows are captured too; bronze still takes a snapshot for its first load, because CDC
-retention (3 days by default) is not a place to keep history.
+Loads with BULK INSERT from /data (sample-data/ mounted into the container), which keeps the load
+fast enough to scale. Where the server cannot see that directory - a CI service container cannot
+mount the workspace - it falls back to batched client-side inserts, which are slower but need no
+shared filesystem. Order follows the foreign keys.
+
+CDC is enabled *before* the load, so the initial rows are captured too; bronze still takes a
+snapshot for its first load, because CDC retention (3 days by default) is not a place to keep
+history.
 """
 
 import argparse
+import csv
+import os
 import sys
 import time
 
@@ -60,7 +66,9 @@ def apply_schema(reset: bool) -> None:
     db = mssql.settings()["database"]
     if reset and database_exists(db):
         print(f"dropping database {db}")
-        mssql.execute(f"ALTER DATABASE [{db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{db}];", database="master")
+        mssql.execute(
+            f"ALTER DATABASE [{db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{db}];", database="master"
+        )
     if database_exists(db):
         print(f"database {db} already exists; leaving schema alone")
         return
@@ -75,16 +83,62 @@ def apply_schema(reset: bool) -> None:
     print(f"created {db} with CDC enabled on {len(mssql.cdc_enabled_tables())} tables")
 
 
+INSERT_BATCH_ROWS = 1000
+
+
+def bulk_insert(table: str, csv_path: str) -> None:
+    """Server-side load: fastest, but the server must be able to read the file."""
+    mssql.execute(
+        f"BULK INSERT dbo.{table} FROM '/data/{csv_path}' "
+        "WITH (FORMAT = 'CSV', FIRSTROW = 2, FIELDTERMINATOR = ',', ROWTERMINATOR = '0x0a', TABLOCK)"
+    )
+
+
+def client_insert(table: str, csv_path: str) -> None:
+    """Client-side load for when the server cannot see the extract directory."""
+    local_path = os.path.join("sample-data", csv_path)
+    with open(local_path, newline="") as handle:
+        reader = csv.reader(handle)
+        columns = next(reader)
+        column_list = ", ".join(f"[{c}]" for c in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        statement = f"INSERT INTO dbo.{table} ({column_list}) VALUES ({placeholders})"
+        with mssql.connection() as conn, conn.cursor() as cur:
+            batch: list[tuple] = []
+            for row in reader:
+                # Empty CSV fields are absent values, not empty strings.
+                batch.append(tuple(value if value != "" else None for value in row))
+                if len(batch) >= INSERT_BATCH_ROWS:
+                    cur.executemany(statement, batch)
+                    batch = []
+            if batch:
+                cur.executemany(statement, batch)
+
+
+def server_can_read_extracts() -> bool:
+    """Whether /data is visible to SQL Server, which decides how the load happens."""
+    # dm_os_enumerate_filesystem raises when the directory is missing, so any error here means
+    # "cannot see it" - a broken connection would fail on the very next statement anyway.
+    try:
+        return bool(
+            mssql.scalar("SELECT COUNT(*) FROM sys.dm_os_enumerate_filesystem('/data/sql_ehr', 'patients.csv')")
+        )
+    except Exception:
+        return False
+
+
 def bulk_load() -> None:
-    for table, csv in TABLES:
+    server_side = server_can_read_extracts()
+    print(f"loading via {'BULK INSERT from /data' if server_side else 'batched client-side inserts'}")
+    for table, csv_path in TABLES:
         existing = mssql.scalar(f"SELECT COUNT(*) FROM dbo.{table}")
         if existing:
             print(f"{table}: {existing} rows already loaded; skipping")
             continue
-        mssql.execute(
-            f"BULK INSERT dbo.{table} FROM '/data/{csv}' "
-            "WITH (FORMAT = 'CSV', FIRSTROW = 2, FIELDTERMINATOR = ',', ROWTERMINATOR = '0x0a', TABLOCK)"
-        )
+        if server_side:
+            bulk_insert(table, csv_path)
+        else:
+            client_insert(table, csv_path)
         print(f"{table}: loaded {mssql.scalar(f'SELECT COUNT(*) FROM dbo.{table}')} rows")
 
 
