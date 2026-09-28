@@ -63,3 +63,11 @@ Dated journal of what landed. Newest last.
   - Recovery needs no replay command: the stage watermark does not advance on failure, so a rerun reprocesses the same bronze batch.
   - `troubleshooting-guide.md` rewritten as five real on-call scenarios (threshold breach, bronze failure, CDC retention gap, schema drift, timestamp confusion).
   - New integration test covers fail -> evidence -> fix -> replay -> no duplicates without needing SQL Server.
+
+## 2026-09-28
+
+- Fix plan step 8 (CI, lint, maintenance) landed locally, pending its first GitHub run:
+  - `pyproject.toml` (ruff + black, 120 cols), `requirements-dev.txt`; repo is ruff- and black-clean. Lint fixes removed dead imports and three unused parameters; no behaviour change (AST-checked).
+  - `.github/workflows/ci.yml`: lint + full suite on a small generated dataset; SQL Server tests skip with reasons. Simulated locally in a clean copy: 29 passed, 2 skipped, 2:25.
+  - `.github/workflows/nightly-integration.yml`: SQL Server service container with Agent (CDC), loader falls back to client-side inserts when `/data` is not mounted, then the full suite and the failure demo.
+  - `scripts/maintain_lakehouse.py`: OPTIMIZE always, VACUUM only on `--vacuum`. Active files 481 -> 75, row counts identical on all 45 tables. Bronze does not compact (partitioned by run ID) - see decisions.

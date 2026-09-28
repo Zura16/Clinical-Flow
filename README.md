@@ -1,10 +1,25 @@
 # ClinicalFlow: A Fault-Tolerant Epic/FHIR Healthcare Lakehouse
 
-![ClinicalFlow Architecture](architecture/data-flow.md)
+[![CI](https://github.com/Zura16/Clinical-Flow/actions/workflows/ci.yml/badge.svg)](https://github.com/Zura16/Clinical-Flow/actions/workflows/ci.yml)
 
-ClinicalFlow is a production-grade, metadata-driven healthcare data engineering platform designed to ingest, process, validate, normalize, and warehouse multi-source clinical data (Synthea FHIR R4 JSON, SQL Server EHR relational database, and External Claims CSVs).
+A metadata-driven healthcare data platform: it ingests synthetic clinical data from three sources
+(FHIR R4 bundles, a SQL Server EHR database with change data capture, and an external claims feed),
+processes only what changed, validates it against a rule table, keeps warehouse history, and
+supports monitoring, failure recovery and analytics.
 
-Engineered around **Medallion Architecture (Bronze -> Silver -> Gold)**, Delta Lake transactional storage, and SQL Data Warehousing, the platform features **Slowly Changing Dimensions (SCD Type 2)**, **Data Quality & Quarantine Framework**, **Audit Observability**, and **Controlled Failure Recovery**.
+Built as a **Medallion lakehouse** (bronze -> silver -> gold) on Delta Lake with a star-schema
+warehouse. The parts worth reading the code for: incremental CDC ingestion with LSN watermarks,
+key-based `MERGE` with a version guard, SCD Type 2 dimensions with point-in-time fact joins, a
+quality framework where severity decides the row and a threshold decides the run, and a failure
+demonstration that genuinely fails and recovers.
+
+Architecture: [`architecture/data-flow.md`](architecture/data-flow.md) ·
+Decisions and findings: [`docs/decisions.md`](docs/decisions.md) ·
+Operations: [`docs/pipeline-runbook.md`](docs/pipeline-runbook.md),
+[`docs/troubleshooting-guide.md`](docs/troubleshooting-guide.md)
+
+> **Epic-inspired, not Epic.** The clinical data is synthetic and the FHIR R4 resources follow the
+> standard Epic exposes; nothing here comes from a real Epic environment or contains real patient data.
 
 ---
 
@@ -128,16 +143,33 @@ python -m databricks.gold.build_dimensions
 python -m databricks.gold.build_facts
 ```
 
-### 3. Run Controlled Failure & Recovery Demonstration
-Current demo: quarantines injected bad lab values and reruns the pipeline (being rebuilt in step 7):
+### 3. Run the Failure & Recovery Demonstration
+Corrupts 500 lab results in SQL Server, fails a real quality gate, shows the evidence, repairs the
+source, replays the stage, and verifies with nine checks that nothing was duplicated or lost
+(~2 minutes, and it repairs the source even if it aborts):
 ```bash
-python -m databricks.utilities.failure_simulation
+python -m databricks.utilities.failure_simulation --bad-rows 500
 ```
 
-### 4. Run PyTest Unit & Integration Test Suite
-Unit and integration tests (they run against a temporary lakehouse, never `delta_lakehouse/`):
+### 4. Tests
+They run against a temporary lakehouse, never `delta_lakehouse/`. The two tests that need SQL Server
+skip themselves when it is not running:
 ```bash
-python -m pytest tests/ -v
+python -m pytest tests -q          # ~12 minutes; Spark dominates
+python -m pytest tests/unit -q     # fast subset
+```
+
+### 5. Lint
+```bash
+pip install -r requirements-dev.txt
+ruff check . && black --check .
+```
+
+### 6. Delta Maintenance
+Compacts small files, and reclaims space only when asked:
+```bash
+python -m scripts.maintain_lakehouse                 # compact, report active vs on-disk files
+python -m scripts.maintain_lakehouse --vacuum        # also expire versions past the retention window
 ```
 
 ---
