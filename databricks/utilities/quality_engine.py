@@ -60,9 +60,8 @@ def _violations(spark: SparkSession, df: DataFrame, rule: QualityRule) -> DataFr
         if "_is_deleted" in reference.columns:
             reference = reference.filter(~F.col("_is_deleted"))
         reference = reference.select(F.col(column).alias("_ref_key")).distinct()
-        return (
-            df.join(reference, df[rule.column_name] == F.col("_ref_key"), "left_anti")
-            .filter(F.col(rule.column_name).isNotNull())
+        return df.join(reference, df[rule.column_name] == F.col("_ref_key"), "left_anti").filter(
+            F.col(rule.column_name).isNotNull()
         )
 
     return None  # FRESHNESS is dataset-scoped and handled separately
@@ -80,25 +79,38 @@ def _freshness_failed(df: DataFrame, rule: QualityRule) -> bool:
 def _quarantine(spark: SparkSession, invalid: DataFrame, rule: QualityRule, run_id: str, id_col: str) -> None:
     """Append violations to the quarantine table, keyed so a rerun cannot duplicate them."""
     rows = (
-        invalid
-        .withColumn("pipeline_run_id", F.lit(run_id))
+        invalid.withColumn("pipeline_run_id", F.lit(run_id))
         .withColumn("source_name", F.lit(rule.dataset_name))
         .withColumn("record_identifier", F.coalesce(F.col(id_col).cast("string"), F.lit("UNKNOWN")))
         .withColumn("failed_rule", F.lit(rule.name))
-        .withColumn("error_message", F.lit(f"{rule.rule_type} failed: {rule.rule_expression} (severity {rule.severity})"))
+        .withColumn(
+            "error_message", F.lit(f"{rule.rule_type} failed: {rule.rule_expression} (severity {rule.severity})")
+        )
         .withColumn("raw_payload", F.to_json(F.struct("*")))
         .withColumn("detected_timestamp", F.current_timestamp())
         .withColumn("resolution_status", F.lit("PENDING"))
-        .withColumn("quarantine_key",
-                    F.sha2(F.concat_ws("||", "pipeline_run_id", "source_name", "record_identifier", "failed_rule"), 256))
-        .select("quarantine_key", "pipeline_run_id", "source_name", "record_identifier", "failed_rule",
-                "error_message", "raw_payload", "detected_timestamp", "resolution_status")
+        .withColumn(
+            "quarantine_key",
+            F.sha2(F.concat_ws("||", "pipeline_run_id", "source_name", "record_identifier", "failed_rule"), 256),
+        )
+        .select(
+            "quarantine_key",
+            "pipeline_run_id",
+            "source_name",
+            "record_identifier",
+            "failed_rule",
+            "error_message",
+            "raw_payload",
+            "detected_timestamp",
+            "resolution_status",
+        )
     )
     if not DeltaTable.isDeltaTable(spark, QUARANTINE_TABLE_PATH):
         rows.write.format("delta").save(QUARANTINE_TABLE_PATH)
         return
     (
-        DeltaTable.forPath(spark, QUARANTINE_TABLE_PATH).alias("t")
+        DeltaTable.forPath(spark, QUARANTINE_TABLE_PATH)
+        .alias("t")
         .merge(rows.alias("s"), "t.quarantine_key = s.quarantine_key")
         .whenNotMatchedInsertAll()
         .execute()
@@ -117,7 +129,8 @@ def _record_results(spark: SparkSession, results: list[dict]) -> None:
         df.write.format("delta").save(DATA_QUALITY_RESULT_PATH)
         return
     (
-        DeltaTable.forPath(spark, DATA_QUALITY_RESULT_PATH).alias("t")
+        DeltaTable.forPath(spark, DATA_QUALITY_RESULT_PATH)
+        .alias("t")
         .merge(df.alias("s"), "t.result_key = s.result_key")
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
@@ -140,8 +153,7 @@ def mark_quarantine_replayed(spark: SparkSession, run_id: str, record_ids: list[
         condition = condition & F.col("record_identifier").isin(record_ids)
     pending = table.toDF().filter(condition & (F.col("resolution_status") == "PENDING")).count()
     if pending:
-        table.update(condition & (F.col("resolution_status") == "PENDING"),
-                     {"resolution_status": F.lit("REPLAYED")})
+        table.update(condition & (F.col("resolution_status") == "PENDING"), {"resolution_status": F.lit("REPLAYED")})
     return pending
 
 
@@ -187,8 +199,11 @@ class DataQualityEngine:
                             keys = [c.strip() for c in rule.rule_expression.split(",")]
                             ordering = F.col("_version").desc() if "_version" in valid.columns else F.lit(1)
                             valid = (
-                                valid.withColumn("_dupe_rank", F.row_number().over(Window.partitionBy(*keys).orderBy(ordering)))
-                                .filter("_dupe_rank = 1").drop("_dupe_rank")
+                                valid.withColumn(
+                                    "_dupe_rank", F.row_number().over(Window.partitionBy(*keys).orderBy(ordering))
+                                )
+                                .filter("_dupe_rank = 1")
+                                .drop("_dupe_rank")
                             )
                         else:
                             valid = valid.join(invalid.select(id_col).distinct(), on=id_col, how="left_anti")
@@ -196,21 +211,25 @@ class DataQualityEngine:
 
             rate = (failed_count / total) * 100
             passed = rate <= rule.failure_threshold
-            results.append({
-                "pipeline_run_id": self.pipeline_run_id,
-                "dataset_name": self.dataset_name,
-                "rule_name": rule.name,
-                "rule_type": rule.rule_type,
-                "severity": rule.severity,
-                "rows_checked": int(total),
-                "rows_failed": int(failed_count),
-                "failure_rate_pct": float(round(rate, 4)),
-                "failure_threshold_pct": float(rule.failure_threshold),
-                "passed": bool(passed),
-            })
+            results.append(
+                {
+                    "pipeline_run_id": self.pipeline_run_id,
+                    "dataset_name": self.dataset_name,
+                    "rule_name": rule.name,
+                    "rule_type": rule.rule_type,
+                    "severity": rule.severity,
+                    "rows_checked": int(total),
+                    "rows_failed": int(failed_count),
+                    "failure_rate_pct": float(round(rate, 4)),
+                    "failure_threshold_pct": float(rule.failure_threshold),
+                    "passed": bool(passed),
+                }
+            )
             if failed_count:
-                print(f"[DQ] {self.dataset_name} {rule.name}: {failed_count}/{total} failed "
-                      f"({rate:.2f}% vs {rule.failure_threshold}% allowed){'' if passed else ' -> THRESHOLD BREACH'}")
+                print(
+                    f"[DQ] {self.dataset_name} {rule.name}: {failed_count}/{total} failed "
+                    f"({rate:.2f}% vs {rule.failure_threshold}% allowed){'' if passed else ' -> THRESHOLD BREACH'}"
+                )
             if not passed:
                 breaches.append(f"{rule.name} {rate:.2f}% > {rule.failure_threshold}% ({failed_count}/{total} rows)")
 

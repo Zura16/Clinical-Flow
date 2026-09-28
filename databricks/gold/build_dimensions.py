@@ -35,8 +35,15 @@ def gold_path(table: str) -> str:
     return os.path.join(GOLD_PATH, table)
 
 
-def upsert_dimension(spark: SparkSession, df: DataFrame, table: str, sk_column: str, run_id: str,
-                     source_name: str, unknown_overrides: dict | None = None) -> int:
+def upsert_dimension(
+    spark: SparkSession,
+    df: DataFrame,
+    table: str,
+    sk_column: str,
+    run_id: str,
+    source_name: str,
+    unknown_overrides: dict | None = None,
+) -> int:
     """Type 1 dimension: insert new members, update changed ones, keep the unknown member."""
     logger = PipelineLogger(spark, run_id, f"gold:{table}", source_name, "GOLD")
     try:
@@ -51,7 +58,8 @@ def upsert_dimension(spark: SparkSession, df: DataFrame, table: str, sk_column: 
 
         target = DeltaTable.forPath(spark, path)
         (
-            target.alias("t").merge(incoming.alias("s"), f"t.{sk_column} = s.{sk_column}")
+            target.alias("t")
+            .merge(incoming.alias("s"), f"t.{sk_column} = s.{sk_column}")
             .whenMatchedUpdateAll(condition="t.record_hash <> s.record_hash")
             .whenNotMatchedInsertAll()
             .execute()
@@ -70,6 +78,7 @@ def upsert_dimension(spark: SparkSession, df: DataFrame, table: str, sk_column: 
 # dim_patient: SCD Type 2
 # ---------------------------------------------------------------------------
 
+
 def patient_source(spark: SparkSession) -> DataFrame | None:
     """EHR and FHIR patients, labelled by source system.
 
@@ -79,13 +88,18 @@ def patient_source(spark: SparkSession) -> DataFrame | None:
     """
     frames = []
     if silver_exists("silver_ehr_patients"):
-        frames.append(read_silver_current(spark, "silver_ehr_patients", include_deleted=True)
-                      .withColumn("source_system", F.lit("sql_ehr")))
+        frames.append(
+            read_silver_current(spark, "silver_ehr_patients", include_deleted=True).withColumn(
+                "source_system", F.lit("sql_ehr")
+            )
+        )
     if silver_exists("silver_fhir_patients"):
-        frames.append(read_silver_current(spark, "silver_fhir_patients", include_deleted=True)
-                      .withColumn("source_system", F.lit("fhir_r4"))
-                      .withColumn("ssn_hash", F.lit(None).cast("string"))
-                      .withColumn("phone_number", F.lit(None).cast("string")))
+        frames.append(
+            read_silver_current(spark, "silver_fhir_patients", include_deleted=True)
+            .withColumn("source_system", F.lit("fhir_r4"))
+            .withColumn("ssn_hash", F.lit(None).cast("string"))
+            .withColumn("phone_number", F.lit(None).cast("string"))
+        )
     if not frames:
         return None
     combined = frames[0]
@@ -100,9 +114,16 @@ def patient_versions(df: DataFrame) -> DataFrame:
     return df.select(
         F.col("source_system"),
         F.col("patient_id"),
-        F.col("first_name"), F.col("last_name"), F.col("date_of_birth"), F.col("gender"),
-        F.col("address_street"), F.col("city"), F.col("state"), F.col("postal_code"),
-        F.col("phone_number"), F.col("insurance_type"),
+        F.col("first_name"),
+        F.col("last_name"),
+        F.col("date_of_birth"),
+        F.col("gender"),
+        F.col("address_street"),
+        F.col("city"),
+        F.col("state"),
+        F.col("postal_code"),
+        F.col("phone_number"),
+        F.col("insurance_type"),
         effective_start.alias("effective_start_date"),
         F.lit(None).cast("timestamp").alias("effective_end_date"),
         F.lit(True).alias("is_current"),
@@ -138,7 +159,10 @@ def build_dim_patient(spark: SparkSession, run_id: str, source: DataFrame | None
                 incoming.withColumn("effective_start_date", F.lit(BEGINNING_OF_TIME).cast("timestamp"))
             )
             initial = with_unknown_member(
-                first_versions, spark, "patient_sk", {"is_current": True, "is_deleted": False},
+                first_versions,
+                spark,
+                "patient_sk",
+                {"is_current": True, "is_deleted": False},
             )
             initial.write.format("delta").save(path)
             rows = initial.count()
@@ -147,10 +171,14 @@ def build_dim_patient(spark: SparkSession, run_id: str, source: DataFrame | None
             return rows
 
         target = DeltaTable.forPath(spark, path)
-        current = target.toDF().filter("is_current AND patient_sk <> -1").select(
-            F.col("source_system").alias("c_source_system"),
-            F.col("patient_id").alias("c_patient_id"),
-            F.col("record_hash").alias("c_record_hash"),
+        current = (
+            target.toDF()
+            .filter("is_current AND patient_sk <> -1")
+            .select(
+                F.col("source_system").alias("c_source_system"),
+                F.col("patient_id").alias("c_patient_id"),
+                F.col("record_hash").alias("c_record_hash"),
+            )
         )
 
         # A version is needed when the natural key is new, or when its content changed.
@@ -166,8 +194,9 @@ def build_dim_patient(spark: SparkSession, run_id: str, source: DataFrame | None
             # already present opens when the change happened.
             .withColumn(
                 "effective_start_date",
-                F.when(F.col("c_patient_id").isNull(), F.lit(BEGINNING_OF_TIME).cast("timestamp"))
-                .otherwise(F.col("effective_start_date")),
+                F.when(F.col("c_patient_id").isNull(), F.lit(BEGINNING_OF_TIME).cast("timestamp")).otherwise(
+                    F.col("effective_start_date")
+                ),
             )
             .select(incoming.columns)
         ).transform(with_version_key)
@@ -186,12 +215,15 @@ def build_dim_patient(spark: SparkSession, run_id: str, source: DataFrame | None
         #    two are contiguous and a point-in-time join cannot fall between them.
         (
             target.alias("t")
-            .merge(changed.alias("s"),
-                   "t.source_system = s.source_system AND t.patient_id = s.patient_id AND t.is_current")
-            .whenMatchedUpdate(set={
-                "is_current": F.lit(False),
-                "effective_end_date": F.col("s.effective_start_date"),
-            })
+            .merge(
+                changed.alias("s"), "t.source_system = s.source_system AND t.patient_id = s.patient_id AND t.is_current"
+            )
+            .whenMatchedUpdate(
+                set={
+                    "is_current": F.lit(False),
+                    "effective_end_date": F.col("s.effective_start_date"),
+                }
+            )
             .execute()
         )
 
@@ -212,8 +244,7 @@ def build_dim_patient(spark: SparkSession, run_id: str, source: DataFrame | None
                 "every change must open exactly one version"
             )
 
-        logger.log_run(rows_read=incoming.count(), rows_inserted=inserted,
-                       rows_updated=changed_count, status="SUCCESS")
+        logger.log_run(rows_read=incoming.count(), rows_inserted=inserted, rows_updated=changed_count, status="SUCCESS")
         print(f"[GOLD] dim_patient: {inserted} new versions")
         return inserted
     except Exception as exc:
@@ -225,13 +256,20 @@ def build_dim_patient(spark: SparkSession, run_id: str, source: DataFrame | None
 # Type 1 dimensions
 # ---------------------------------------------------------------------------
 
+
 def build_dim_provider(spark: SparkSession, run_id: str) -> int:
     if not silver_exists("silver_ehr_providers"):
         return 0
     df = read_silver_current(spark, "silver_ehr_providers").select(
         surrogate_key(F.col("provider_id")).alias("provider_sk"),
-        "provider_id", "npi", "first_name", "last_name", "specialty",
-        "department_id", "facility_id", "record_hash",
+        "provider_id",
+        "npi",
+        "first_name",
+        "last_name",
+        "specialty",
+        "department_id",
+        "facility_id",
+        "record_hash",
     )
     return upsert_dimension(spark, df, "dim_provider", "provider_sk", run_id, "sql_ehr")
 
@@ -241,8 +279,14 @@ def build_dim_facility(spark: SparkSession, run_id: str) -> int:
         return 0
     df = read_silver_current(spark, "silver_facilities").select(
         surrogate_key(F.col("facility_id")).alias("facility_sk"),
-        "facility_id", "facility_name", "facility_type", "address", "city", "state",
-        "postal_code", "record_hash",
+        "facility_id",
+        "facility_name",
+        "facility_type",
+        "address",
+        "city",
+        "state",
+        "postal_code",
+        "record_hash",
     )
     return upsert_dimension(spark, df, "dim_facility", "facility_sk", run_id, "claims_csv")
 
@@ -295,7 +339,8 @@ def build_dim_department(spark: SparkSession, run_id: str) -> int:
     ids = (
         read_silver_current(spark, "silver_ehr_encounters")
         .filter(F.col("department_id").isNotNull())
-        .select("department_id").distinct()
+        .select("department_id")
+        .distinct()
     )
     df = ids.select(
         surrogate_key(F.col("department_id")).alias("department_sk"),
@@ -306,7 +351,7 @@ def build_dim_department(spark: SparkSession, run_id: str) -> int:
     return upsert_dimension(spark, df, "dim_department", "department_sk", run_id, "sql_ehr")
 
 
-def build_dim_date(spark: SparkSession, run_id: str) -> int:
+def build_dim_date(spark: SparkSession) -> int:
     path = gold_path("dim_date")
     if DeltaTable.isDeltaTable(spark, path):
         return 0
@@ -336,7 +381,7 @@ def build_gold_dimensions(spark: SparkSession | None = None, run_id: str | None 
     spark = spark or get_spark_session("ClinicalFlow_Gold_Dimensions")
     run_id = run_id or f"run-{uuid.uuid4().hex[:10]}"
     print(f"STARTING GOLD DIMENSIONS (run {run_id})")
-    total = build_dim_date(spark, run_id)
+    total = build_dim_date(spark)
     total += build_dim_patient(spark, run_id)
     total += build_dim_provider(spark, run_id)
     total += build_dim_facility(spark, run_id)

@@ -43,7 +43,6 @@ from databricks.utilities.quality_engine import (
     DataQualityThresholdError,
     mark_quarantine_replayed,
 )
-from databricks.utilities.quality_rules import DATA_QUALITY_RULE_PATH
 
 LAB_SPEC = next(s for s in ALL_SPECS if s.name == "silver_ehr_lab_results")
 BAD_VALUE = -99999.0
@@ -55,6 +54,7 @@ def banner(step: str, title: str) -> None:
 
 def table_count(spark, root, table, live_only: bool = False) -> int:
     import os
+
     path = os.path.join(root, table)
     if not os.path.isdir(os.path.join(path, "_delta_log")):
         return 0
@@ -72,8 +72,9 @@ def snapshot(spark) -> dict:
         "silver lab rows (live)": table_count(spark, SILVER_PATH, "silver_ehr_lab_results", live_only=True),
         "silver lab rows (incl. soft-deleted)": table_count(spark, SILVER_PATH, "silver_ehr_lab_results"),
         "gold fact_observation": table_count(spark, GOLD_PATH, "fact_observation"),
-        "quarantine rows": table_count(spark, QUARANTINE_TABLE_PATH.rsplit("/", 1)[0],
-                                       QUARANTINE_TABLE_PATH.rsplit("/", 1)[1]),
+        "quarantine rows": table_count(
+            spark, QUARANTINE_TABLE_PATH.rsplit("/", 1)[0], QUARANTINE_TABLE_PATH.rsplit("/", 1)[1]
+        ),
     }
 
 
@@ -85,8 +86,10 @@ def print_counts(label: str, counts: dict) -> None:
 
 def corrupt_lab_results(rows: int) -> list[str]:
     """Corrupt real rows at source: a negative value, and a result before its own order."""
-    ids = [r["lab_result_id"] for r in mssql.query(
-        f"SELECT TOP {rows} lab_result_id FROM dbo.lab_results ORDER BY lab_result_id")]
+    ids = [
+        r["lab_result_id"]
+        for r in mssql.query(f"SELECT TOP {rows} lab_result_id FROM dbo.lab_results ORDER BY lab_result_id")
+    ]
     id_list = "', '".join(ids)
     mssql.execute(
         f"UPDATE dbo.lab_results SET result_value = {BAD_VALUE}, "
@@ -106,8 +109,7 @@ def repair_lab_results(ids: list[str]) -> None:
     )
 
 
-VIOLATION_PREDICATE = ("result_value < -500 OR result_value > 50000 "
-                       "OR result_timestamp < order_timestamp")
+VIOLATION_PREDICATE = "result_value < -500 OR result_value > 50000 " "OR result_timestamp < order_timestamp"
 
 
 def source_violations() -> int:
@@ -133,6 +135,7 @@ def ensure_clean_baseline() -> None:
 
 def show(spark, path, condition, columns, title, limit=5) -> int:
     import os
+
     if not os.path.isdir(os.path.join(path, "_delta_log")):
         print(f"    {title}: table does not exist yet")
         return 0
@@ -187,20 +190,45 @@ def run_demo(bad_rows: int = 500) -> None:
         print(f"    silver failed as designed: {failure}")
 
         banner("4", "Evidence left behind")
-        show(spark, AUDIT_TABLE_PATH, f"pipeline_run_id = '{run_bad}' AND execution_status = 'FAILED'",
-             ["pipeline_name", "execution_status", "error_code"], "FAILED audit rows")
-        show(spark, ALERT_TABLE_PATH, f"pipeline_run_id = '{run_bad}'",
-             ["pipeline_name", "severity", "summary"], "alerts raised", limit=2)
-        show(spark, QUARANTINE_TABLE_PATH, f"pipeline_run_id = '{run_bad}'",
-             ["record_identifier", "failed_rule", "resolution_status"], "quarantined records", limit=3)
-        show(spark, DATA_QUALITY_RESULT_PATH, f"pipeline_run_id = '{run_bad}' AND NOT passed",
-             ["rule_name", "rows_checked", "rows_failed", "failure_rate_pct", "failure_threshold_pct"],
-             "rules over threshold")
+        show(
+            spark,
+            AUDIT_TABLE_PATH,
+            f"pipeline_run_id = '{run_bad}' AND execution_status = 'FAILED'",
+            ["pipeline_name", "execution_status", "error_code"],
+            "FAILED audit rows",
+        )
+        show(
+            spark,
+            ALERT_TABLE_PATH,
+            f"pipeline_run_id = '{run_bad}'",
+            ["pipeline_name", "severity", "summary"],
+            "alerts raised",
+            limit=2,
+        )
+        show(
+            spark,
+            QUARANTINE_TABLE_PATH,
+            f"pipeline_run_id = '{run_bad}'",
+            ["record_identifier", "failed_rule", "resolution_status"],
+            "quarantined records",
+            limit=3,
+        )
+        show(
+            spark,
+            DATA_QUALITY_RESULT_PATH,
+            f"pipeline_run_id = '{run_bad}' AND NOT passed",
+            ["rule_name", "rows_checked", "rows_failed", "failure_rate_pct", "failure_threshold_pct"],
+            "rules over threshold",
+        )
         watermark_after_failure = get_stage_watermark(spark, SILVER_STAGE, LAB_SPEC.name)
-        print(f"    stage watermark unchanged: {watermark_after_failure == watermark_before} "
-              f"({watermark_after_failure})")
-        print("    silver row count unchanged: "
-              f"{table_count(spark, SILVER_PATH, 'silver_ehr_lab_results', live_only=True) == baseline['silver lab rows (live)']}")
+        print(
+            f"    stage watermark unchanged: {watermark_after_failure == watermark_before} "
+            f"({watermark_after_failure})"
+        )
+        print(
+            "    silver row count unchanged: "
+            f"{table_count(spark, SILVER_PATH, 'silver_ehr_lab_results', live_only=True) == baseline['silver lab rows (live)']}"
+        )
         print("    -> because the watermark did not move, the same bronze batch is still pending:")
         print("       rerunning the stage reprocesses exactly it, with no partition to pick by hand")
 
@@ -225,7 +253,8 @@ def run_demo(bad_rows: int = 500) -> None:
         bronze_rows = after["bronze lab rows (all versions)"]
 
         repaired_rows = (
-            spark.read.format("delta").load(f"{SILVER_PATH}/silver_ehr_lab_results")
+            spark.read.format("delta")
+            .load(f"{SILVER_PATH}/silver_ehr_lab_results")
             .filter(F.col("lab_result_id").isin(corrupted))
         )
         # A fixed silver with a stale gold is not a recovery, so check the warehouse too.
@@ -233,18 +262,22 @@ def run_demo(bad_rows: int = 500) -> None:
         facts = spark.read.format("delta").load(f"{GOLD_PATH}/fact_observation")
         repaired_facts = facts.filter(F.col("observation_id").isin(corrupted))
         live_fhir = table_count(spark, SILVER_PATH, "silver_fhir_observations", live_only=True)
-        still_pending = spark.read.format("delta").load(QUARANTINE_TABLE_PATH).filter(
-            (F.col("pipeline_run_id") == run_bad) & (F.col("resolution_status") == "PENDING")).count()
+        still_pending = (
+            spark.read.format("delta")
+            .load(QUARANTINE_TABLE_PATH)
+            .filter((F.col("pipeline_run_id") == run_bad) & (F.col("resolution_status") == "PENDING"))
+            .count()
+        )
 
         checks = {
             "live silver rows match the source exactly (no duplicates)": live_rows == source_rows,
             "silver did not grow by the corrupt batch": live_rows == baseline["silver lab rows (live)"],
-            "bronze kept every version, including the corrupt ones":
-                bronze_rows > baseline["bronze lab rows (all versions)"],
+            "bronze kept every version, including the corrupt ones": bronze_rows
+            > baseline["bronze lab rows (all versions)"],
             "quarantine kept the evidence": after["quarantine rows"] > baseline["quarantine rows"],
             "repaired rows are present in silver exactly once": repaired_rows.count() == len(corrupted),
-            "no corrupt value survived into silver":
-                repaired_rows.filter(F.col("result_value") == BAD_VALUE).count() == 0,
+            "no corrupt value survived into silver": repaired_rows.filter(F.col("result_value") == BAD_VALUE).count()
+            == 0,
             "gold carries the corrected values": (
                 repaired_facts.count() == len(corrupted)
                 and repaired_facts.filter(F.col("result_value") == BAD_VALUE).count() == 0
@@ -254,15 +287,19 @@ def run_demo(bad_rows: int = 500) -> None:
         }
 
         print()
-        print(f"    reconciliation: fact_observation {facts.count()} = live labs {live_rows} "
-              f"+ live FHIR observations {live_fhir}")
+        print(
+            f"    reconciliation: fact_observation {facts.count()} = live labs {live_rows} "
+            f"+ live FHIR observations {live_fhir}"
+        )
         for label, ok in checks.items():
             print(f"    [{'PASS' if ok else 'FAIL'}] {label}")
         if not all(checks.values()):
             raise SystemExit("recovery verification failed")
-        print("\n  Recovery verified. Bronze holds every version including the corrupt ones, quarantine\n"
-              "  holds the rejected rows marked REPLAYED, silver and gold hold one correct row per lab\n"
-              "  result, and no record was lost or double-counted.")
+        print(
+            "\n  Recovery verified. Bronze holds every version including the corrupt ones, quarantine\n"
+            "  holds the rejected rows marked REPLAYED, silver and gold hold one correct row per lab\n"
+            "  result, and no record was lost or double-counted."
+        )
     finally:
         # An abort must not leave the source corrupted for the next run.
         if corrupted and not repaired:

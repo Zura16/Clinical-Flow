@@ -29,6 +29,7 @@ from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
+from databricks.utilities.alerting import raise_alert
 from databricks.utilities.config import BRONZE_PATH, SILVER_PATH, add_record_hash
 from databricks.utilities.control import (
     SILVER_STAGE,
@@ -37,7 +38,6 @@ from databricks.utilities.control import (
     get_source_config,
     get_stage_watermark,
 )
-from databricks.utilities.alerting import raise_alert
 from databricks.utilities.logger import PipelineLogger
 from databricks.utilities.quality_engine import DataQualityEngine, DataQualityThresholdError
 
@@ -49,20 +49,21 @@ CDC_DELETE = 1
 class SilverSpec:
     """One silver table: where it comes from and what it looks like."""
 
-    name: str                       # silver table name
-    bronze_table: str               # bronze table it consumes
-    key_columns: list[str]          # business key in silver
-    columns: dict[str, str]         # silver column -> SQL expression over the bronze/parsed row
-    hash_columns: list[str]         # attributes whose change means the record changed
-    dq_dataset: str | None = None   # rules to apply, if any
+    name: str  # silver table name
+    bronze_table: str  # bronze table it consumes
+    key_columns: list[str]  # business key in silver
+    columns: dict[str, str]  # silver column -> SQL expression over the bronze/parsed row
+    hash_columns: list[str]  # attributes whose change means the record changed
+    dq_dataset: str | None = None  # rules to apply, if any
     resource_schema: str | None = None  # FHIR only: parse resource_json with this schema first
-    deleted_expr: str | None = None     # extra source-side soft-delete condition
+    deleted_expr: str | None = None  # extra source-side soft-delete condition
     extra_columns: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Pure transforms
 # ---------------------------------------------------------------------------
+
 
 def version_expr(cfg: SourceConfig):
     """A single comparable string for "how new is this row", per ingestion type.
@@ -98,7 +99,9 @@ def to_silver_columns(df: DataFrame, spec: SilverSpec, cfg: SourceConfig) -> Dat
         # Parse the raw FHIR JSON, keeping the bronze bookkeeping columns alongside it.
         df = df.select(
             F.from_json("resource_json", spec.resource_schema).alias("r"),
-            "_version", "_ingested_at", "_pipeline_run_id",
+            "_version",
+            "_ingested_at",
+            "_pipeline_run_id",
         ).select("r.*", "_version", "_ingested_at", "_pipeline_run_id")
 
     # A CDC delete row carries the deleted record's values, so the column mapping still applies.
@@ -116,16 +119,15 @@ def to_silver_columns(df: DataFrame, spec: SilverSpec, cfg: SourceConfig) -> Dat
     )
     projected = add_record_hash(projected, spec.hash_columns)
 
-    return (
-        projected
-        .withColumn("_deleted_at", F.when(F.col("_is_deleted"), F.current_timestamp()))
-        .withColumn("_updated_at", F.current_timestamp())
+    return projected.withColumn("_deleted_at", F.when(F.col("_is_deleted"), F.current_timestamp())).withColumn(
+        "_updated_at", F.current_timestamp()
     )
 
 
 # ---------------------------------------------------------------------------
 # Merge
 # ---------------------------------------------------------------------------
+
 
 def merge_into_silver(spark: SparkSession, batch: DataFrame, spec: SilverSpec, cfg: SourceConfig) -> dict:
     target_path = os.path.join(SILVER_PATH, spec.name)
@@ -137,7 +139,8 @@ def merge_into_silver(spark: SparkSession, batch: DataFrame, spec: SilverSpec, c
     target = DeltaTable.forPath(spark, target_path)
     condition = " AND ".join(f"t.{k} = s.{k}" for k in spec.key_columns)
     merge = (
-        target.alias("t").merge(batch.alias("s"), condition)
+        target.alias("t")
+        .merge(batch.alias("s"), condition)
         # The version guard: an older version can never overwrite a newer one.
         .whenMatchedUpdateAll(condition="s._version > t._version")
         .whenNotMatchedInsertAll()
@@ -146,17 +149,24 @@ def merge_into_silver(spark: SparkSession, batch: DataFrame, spec: SilverSpec, c
         # The batch is a complete snapshot, so a key that is absent from it was removed at source.
         merge = merge.whenNotMatchedBySourceUpdate(
             condition="t._is_deleted = false",
-            set={"_is_deleted": F.lit(True), "_deleted_at": F.current_timestamp(), "_updated_at": F.current_timestamp()},
+            set={
+                "_is_deleted": F.lit(True),
+                "_deleted_at": F.current_timestamp(),
+                "_updated_at": F.current_timestamp(),
+            },
         )
     merge.execute()
 
     metrics = target.history(1).select("operationMetrics").first()["operationMetrics"]
-    return {k: int(metrics.get(k, 0)) for k in ("numTargetRowsInserted", "numTargetRowsUpdated", "numTargetRowsDeleted")}
+    return {
+        k: int(metrics.get(k, 0)) for k in ("numTargetRowsInserted", "numTargetRowsUpdated", "numTargetRowsDeleted")
+    }
 
 
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+
 
 def process_spec(spark: SparkSession, spec: SilverSpec, run_id: str) -> int:
     pipeline_name = f"silver:{spec.name}"
@@ -176,8 +186,7 @@ def process_spec(spark: SparkSession, spec: SilverSpec, run_id: str) -> int:
             increment.unpersist()
             return 0
 
-        new_watermark = increment.agg(
-            F.date_format(F.max("_ingested_at"), WATERMARK_FORMAT).alias("wm")).first()["wm"]
+        new_watermark = increment.agg(F.date_format(F.max("_ingested_at"), WATERMARK_FORMAT).alias("wm")).first()["wm"]
 
         # Collapse on the source's own key (pipeline_config), not silver's: at this point the
         # rows are still bronze-shaped (a FHIR row is keyed by resource_id, not patient_id).
@@ -198,23 +207,36 @@ def process_spec(spark: SparkSession, spec: SilverSpec, run_id: str) -> int:
             rows_updated=metrics["numTargetRowsUpdated"],
             rows_deleted=metrics["numTargetRowsDeleted"],
             rows_rejected=rejected,
-            watermark_start=since, watermark_end=new_watermark, status="SUCCESS",
+            watermark_start=since,
+            watermark_end=new_watermark,
+            status="SUCCESS",
         )
-        print(f"[SILVER] {spec.name}: read {rows_read}, inserted {metrics['numTargetRowsInserted']}, "
-              f"updated {metrics['numTargetRowsUpdated']}, rejected {rejected}")
+        print(
+            f"[SILVER] {spec.name}: read {rows_read}, inserted {metrics['numTargetRowsInserted']}, "
+            f"updated {metrics['numTargetRowsUpdated']}, rejected {rejected}"
+        )
         increment.unpersist()
         return rows_read
     except Exception as exc:
-        logger.log_run(watermark_start=since, status="FAILED",
-                       error_code=type(exc).__name__, error_message=str(exc)[:2000])
+        logger.log_run(
+            watermark_start=since, status="FAILED", error_code=type(exc).__name__, error_message=str(exc)[:2000]
+        )
         if isinstance(exc, DataQualityThresholdError):
-            next_step = (f"inspect quarantine_records and data_quality_result for run {run_id}, fix the "
-                         f"source or the rule, then rerun this table: the stage watermark did not move, "
-                         f"so the same bronze batch is reprocessed")
+            next_step = (
+                f"inspect quarantine_records and data_quality_result for run {run_id}, fix the "
+                f"source or the rule, then rerun this table: the stage watermark did not move, "
+                f"so the same bronze batch is reprocessed"
+            )
         else:
             next_step = f"see pipeline_run_audit for run {run_id}; rerunning reprocesses the same bronze batch"
-        raise_alert(spark, run_id, pipeline_name, summary=f"{type(exc).__name__}: {str(exc)[:300]}",
-                    detail=f"silver table {spec.name} from bronze {spec.bronze_table}", next_step=next_step)
+        raise_alert(
+            spark,
+            run_id,
+            pipeline_name,
+            summary=f"{type(exc).__name__}: {str(exc)[:300]}",
+            detail=f"silver table {spec.name} from bronze {spec.bronze_table}",
+            next_step=next_step,
+        )
         raise
 
 

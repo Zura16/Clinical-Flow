@@ -32,8 +32,9 @@ def source_csv(tmp_path_factory):
 def cfg(source_csv):
     # Absolute source_location: os.path.join(BASE_DIR, abs_path) returns abs_path.
     # claims_csv selects the CSV reader; the unique source_table keeps this test's watermark separate.
-    return SourceConfig("claims_csv", "test_patients", "bronze_test_patients", "Watermark",
-                        "updated_at", "patient_id", str(source_csv))
+    return SourceConfig(
+        "claims_csv", "test_patients", "bronze_test_patients", "Watermark", "updated_at", "patient_id", str(source_csv)
+    )
 
 
 def landed_by_run(spark, cfg):
@@ -48,8 +49,10 @@ def test_bronze_incremental_lifecycle(spark, cfg, source_csv):
     assert get_watermark(spark, cfg) == "2024-01-02 00:00:00.000000"
 
     # 2. p1 moves and p3 is added: only those two rows land.
-    source_csv.write_text(HEADER + "p1,9 New Ave,2024-03-01 00:00:00\np2,2 Elm St,2024-01-02 00:00:00\n"
-                                   "p3,3 Oak Rd,2024-03-02 00:00:00\n")
+    source_csv.write_text(
+        HEADER + "p1,9 New Ave,2024-03-01 00:00:00\np2,2 Elm St,2024-01-02 00:00:00\n"
+        "p3,3 Oak Rd,2024-03-02 00:00:00\n"
+    )
     assert ingest_table(spark, cfg, "run-b") == 2
     assert get_watermark(spark, cfg) == "2024-03-02 00:00:00.000000"
 
@@ -73,7 +76,8 @@ def test_bronze_incremental_lifecycle(spark, cfg, source_csv):
     assert landed_by_run(spark, cfg) == {"run-a": 2, "run-b": 2}
     assert get_watermark(spark, cfg) == "2024-03-02 00:00:00.000000"
     failed = (
-        spark.read.format("delta").load(AUDIT_TABLE_PATH)
+        spark.read.format("delta")
+        .load(AUDIT_TABLE_PATH)
         .filter((F.col("pipeline_run_id") == "run-c") & (F.col("pipeline_name") == "bronze:bronze_test_patients"))
         .select("execution_status", "error_code")
         .collect()
