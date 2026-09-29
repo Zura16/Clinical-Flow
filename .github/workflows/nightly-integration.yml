@@ -50,5 +50,14 @@ jobs:
         run: python -m scripts.setup_source_db
       - name: Tests (CDC tests now run instead of skipping)
         run: python -m pytest tests -q -rs
+      - name: Build the lakehouse
+        # The tests use a temporary lakehouse, so the real one is still empty here. This is the
+        # operator's order, and the only end-to-end run against a real SQL Server outside the tests.
+        run: |
+          python -m databricks.bronze.ingest_raw_data
+          python -m databricks.silver.process_fhir_silver
+          python -m databricks.silver.process_relational_silver
+          python -m databricks.gold.build_dimensions
+          python -m databricks.gold.build_facts
       - name: Failure and recovery demonstration
         run: python -m databricks.utilities.failure_simulation --bad-rows 50
