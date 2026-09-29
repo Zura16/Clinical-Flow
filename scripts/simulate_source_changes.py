@@ -16,8 +16,9 @@ from databricks.utilities import sqlserver as mssql
 
 def apply_changes(patients: int = 5) -> dict:
     """Move some patients, admit a new one, and delete one. Returns what changed."""
-    movers = [r["patient_id"] for r in mssql.query(
-        f"SELECT TOP {patients} patient_id FROM dbo.patients ORDER BY patient_id")]
+    movers = [
+        r["patient_id"] for r in mssql.query(f"SELECT TOP {patients} patient_id FROM dbo.patients ORDER BY patient_id")
+    ]
     if not movers:
         raise RuntimeError("no patients in the source database; run scripts.setup_source_db first")
 

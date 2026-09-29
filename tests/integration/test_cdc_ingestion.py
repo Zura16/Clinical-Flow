@@ -29,8 +29,9 @@ def spark():
 
 @pytest.fixture(scope="module")
 def cfg():
-    return SourceConfig("sql_ehr", "patients", "bronze_cdc_test_patients", "CDC",
-                        "_cdc_lsn", "patient_id", "dbo.patients")
+    return SourceConfig(
+        "sql_ehr", "patients", "bronze_cdc_test_patients", "CDC", "_cdc_lsn", "patient_id", "dbo.patients"
+    )
 
 
 def bronze(spark, cfg):
@@ -70,5 +71,6 @@ def test_cdc_snapshot_then_changes(spark, cfg):
         assert address.startswith("Moved "), f"{patient_id} kept its old address {address!r}"
 
     # 5. The delete is still in bronze as evidence, even though current state drops it.
-    assert bronze(spark, cfg).filter(
-        f"patient_id = '{changed['deleted']}' AND _cdc_operation = {CDC_DELETE}").count() == 1
+    assert (
+        bronze(spark, cfg).filter(f"patient_id = '{changed['deleted']}' AND _cdc_operation = {CDC_DELETE}").count() == 1
+    )

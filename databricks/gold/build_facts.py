@@ -36,15 +36,17 @@ def gold_path(table: str) -> str:
     return os.path.join(GOLD_PATH, table)
 
 
-def patient_sk_as_of(spark: SparkSession, df: DataFrame, patient_id: Column, event_time: Column,
-                     source_system: str) -> DataFrame:
+def patient_sk_as_of(
+    spark: SparkSession, df: DataFrame, patient_id: Column, event_time: Column, source_system: str
+) -> DataFrame:
     """Attach the patient_sk that was current when the event happened.
 
     An event with no matching version (an unknown patient, or one whose first version starts after
     the event) resolves to the unknown member rather than dropping the fact or carrying a NULL.
     """
     dim = (
-        spark.read.format("delta").load(gold_path("dim_patient"))
+        spark.read.format("delta")
+        .load(gold_path("dim_patient"))
         .filter(F.col("patient_sk") != UNKNOWN_SK)
         .filter(F.col("source_system") == source_system)
         .select(
@@ -62,10 +64,8 @@ def patient_sk_as_of(spark: SparkSession, df: DataFrame, patient_id: Column, eve
         & (event_time < F.col("_dim_end")),
         "left_outer",
     )
-    return (
-        joined
-        .withColumn("patient_sk", F.coalesce(F.col("_dim_sk"), F.lit(UNKNOWN_SK)))
-        .drop("_dim_sk", "_dim_patient_id", "_dim_start", "_dim_end")
+    return joined.withColumn("patient_sk", F.coalesce(F.col("_dim_sk"), F.lit(UNKNOWN_SK))).drop(
+        "_dim_sk", "_dim_patient_id", "_dim_start", "_dim_end"
     )
 
 
@@ -82,7 +82,8 @@ def merge_fact(spark: SparkSession, df: DataFrame, table: str, key: str, run_id:
 
         target = DeltaTable.forPath(spark, path)
         (
-            target.alias("t").merge(df.alias("s"), f"t.{key} = s.{key}")
+            target.alias("t")
+            .merge(df.alias("s"), f"t.{key} = s.{key}")
             .whenMatchedUpdateAll()
             .whenNotMatchedInsertAll()
             # A fact whose silver record has gone is removed; the dimension keeps the history.
@@ -93,8 +94,9 @@ def merge_fact(spark: SparkSession, df: DataFrame, table: str, key: str, run_id:
         inserted = int(metrics.get("numTargetRowsInserted", 0))
         updated = int(metrics.get("numTargetRowsUpdated", 0))
         deleted = int(metrics.get("numTargetRowsDeleted", 0))
-        logger.log_run(rows_read=rows, rows_inserted=inserted, rows_updated=updated,
-                       rows_deleted=deleted, status="SUCCESS")
+        logger.log_run(
+            rows_read=rows, rows_inserted=inserted, rows_updated=updated, rows_deleted=deleted, status="SUCCESS"
+        )
         print(f"[GOLD] {table}: inserted {inserted}, updated {updated}, deleted {deleted}")
         return inserted + updated + deleted
     except Exception as exc:
@@ -105,6 +107,7 @@ def merge_fact(spark: SparkSession, df: DataFrame, table: str, key: str, run_id:
 # ---------------------------------------------------------------------------
 # Facts
 # ---------------------------------------------------------------------------
+
 
 def build_fact_encounter(spark: SparkSession, run_id: str) -> int:
     if not silver_exists("silver_ehr_encounters"):
@@ -118,14 +121,11 @@ def build_fact_encounter(spark: SparkSession, run_id: str) -> int:
     with_previous = encounters.withColumn("_previous_discharge", F.lag("discharge_timestamp").over(by_patient))
     days_since = F.datediff(F.col("admission_timestamp"), F.col("_previous_discharge"))
 
-    facts = (
-        with_previous
-        .withColumn("days_since_previous_discharge", days_since)
-        .withColumn(
-            "is_readmission_30d",
-            F.when(F.col("_previous_discharge").isNull(), F.lit(False))
-            .otherwise((days_since >= 0) & (days_since <= READMISSION_WINDOW_DAYS)),
-        )
+    facts = with_previous.withColumn("days_since_previous_discharge", days_since).withColumn(
+        "is_readmission_30d",
+        F.when(F.col("_previous_discharge").isNull(), F.lit(False)).otherwise(
+            (days_since >= 0) & (days_since <= READMISSION_WINDOW_DAYS)
+        ),
     )
     facts = patient_sk_as_of(spark, facts, F.col("patient_id"), F.col("admission_timestamp"), "sql_ehr")
 
@@ -160,40 +160,44 @@ def build_fact_observation(spark: SparkSession, run_id: str) -> int:
     if silver_exists("silver_ehr_lab_results"):
         labs = read_silver_current(spark, "silver_ehr_lab_results")
         labs = patient_sk_as_of(spark, labs, F.col("patient_id"), F.col("result_timestamp"), "sql_ehr")
-        frames.append(labs.select(
-            F.col("lab_result_id").alias("observation_id"),
-            F.lit("sql_ehr").alias("source_system"),
-            F.col("patient_sk"),
-            F.col("encounter_id"),
-            date_key(F.col("result_timestamp")).alias("observation_date_key"),
-            F.col("result_timestamp").alias("observation_timestamp"),
-            F.col("loinc_code"),
-            F.col("test_name"),
-            F.col("result_value"),
-            F.col("result_unit"),
-            F.col("abnormal_flag"),
-            F.round(
-                (F.col("result_timestamp").cast("long") - F.col("order_timestamp").cast("long")) / 60.0, 1
-            ).alias("turnaround_minutes"),
-        ))
+        frames.append(
+            labs.select(
+                F.col("lab_result_id").alias("observation_id"),
+                F.lit("sql_ehr").alias("source_system"),
+                F.col("patient_sk"),
+                F.col("encounter_id"),
+                date_key(F.col("result_timestamp")).alias("observation_date_key"),
+                F.col("result_timestamp").alias("observation_timestamp"),
+                F.col("loinc_code"),
+                F.col("test_name"),
+                F.col("result_value"),
+                F.col("result_unit"),
+                F.col("abnormal_flag"),
+                F.round(
+                    (F.col("result_timestamp").cast("long") - F.col("order_timestamp").cast("long")) / 60.0, 1
+                ).alias("turnaround_minutes"),
+            )
+        )
     if silver_exists("silver_fhir_observations"):
         obs = read_silver_current(spark, "silver_fhir_observations")
         obs = patient_sk_as_of(spark, obs, F.col("patient_id"), F.col("observation_timestamp"), "fhir_r4")
-        frames.append(obs.select(
-            F.col("observation_id"),
-            F.lit("fhir_r4").alias("source_system"),
-            F.col("patient_sk"),
-            F.col("encounter_id"),
-            date_key(F.col("observation_timestamp")).alias("observation_date_key"),
-            F.col("observation_timestamp"),
-            F.col("loinc_code"),
-            F.col("test_name"),
-            F.col("result_value"),
-            F.col("result_unit"),
-            F.lit(None).cast("string").alias("abnormal_flag"),
-            # No order time in FHIR Observation: unanswerable, not zero.
-            F.lit(None).cast("double").alias("turnaround_minutes"),
-        ))
+        frames.append(
+            obs.select(
+                F.col("observation_id"),
+                F.lit("fhir_r4").alias("source_system"),
+                F.col("patient_sk"),
+                F.col("encounter_id"),
+                date_key(F.col("observation_timestamp")).alias("observation_date_key"),
+                F.col("observation_timestamp"),
+                F.col("loinc_code"),
+                F.col("test_name"),
+                F.col("result_value"),
+                F.col("result_unit"),
+                F.lit(None).cast("string").alias("abnormal_flag"),
+                # No order time in FHIR Observation: unanswerable, not zero.
+                F.lit(None).cast("double").alias("turnaround_minutes"),
+            )
+        )
     if not frames:
         return 0
     combined = frames[0]
@@ -243,8 +247,7 @@ def build_fact_claim(spark: SparkSession, run_id: str) -> int:
     if not silver_exists("silver_claims"):
         return 0
     claims = read_silver_current(spark, "silver_claims")
-    claims = patient_sk_as_of(spark, claims, F.col("patient_id"),
-                              F.col("service_date").cast("timestamp"), "sql_ehr")
+    claims = patient_sk_as_of(spark, claims, F.col("patient_id"), F.col("service_date").cast("timestamp"), "sql_ehr")
     out = claims.select(
         F.col("claim_id"),
         F.col("patient_sk"),

@@ -8,7 +8,7 @@ and ADF reads pipeline_config with a Lookup activity.
 """
 
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
@@ -50,44 +50,164 @@ class SourceConfig:
         return [c.strip() for c in self.primary_key_columns.split(",")]
 
 
-PIPELINE_CONFIG_SCHEMA = StructType([
-    StructField("source_name", StringType(), False),
-    StructField("source_table", StringType(), False),
-    StructField("destination_table", StringType(), False),
-    StructField("ingestion_type", StringType(), False),
-    StructField("watermark_column", StringType(), True),
-    StructField("primary_key_columns", StringType(), False),
-    StructField("source_location", StringType(), False),
-    StructField("active_flag", BooleanType(), False),
-    StructField("data_quality_threshold", DoubleType(), False),
-])
+PIPELINE_CONFIG_SCHEMA = StructType(
+    [
+        StructField("source_name", StringType(), False),
+        StructField("source_table", StringType(), False),
+        StructField("destination_table", StringType(), False),
+        StructField("ingestion_type", StringType(), False),
+        StructField("watermark_column", StringType(), True),
+        StructField("primary_key_columns", StringType(), False),
+        StructField("source_location", StringType(), False),
+        StructField("active_flag", BooleanType(), False),
+        StructField("data_quality_threshold", DoubleType(), False),
+    ]
+)
 
-WATERMARK_STATE_SCHEMA = StructType([
-    StructField("source_name", StringType(), False),
-    StructField("source_table", StringType(), False),
-    StructField("watermark_value", StringType(), False),
-    StructField("ingestion_type", StringType(), False),
-    StructField("last_pipeline_run_id", StringType(), False),
-    StructField("updated_at", StringType(), False),
-])
+WATERMARK_STATE_SCHEMA = StructType(
+    [
+        StructField("source_name", StringType(), False),
+        StructField("source_table", StringType(), False),
+        StructField("watermark_value", StringType(), False),
+        StructField("ingestion_type", StringType(), False),
+        StructField("last_pipeline_run_id", StringType(), False),
+        StructField("updated_at", StringType(), False),
+    ]
+)
 
 # Seed rows. source_location is a repo-relative path for file sources, or schema.table for CDC.
 # Keep in sync with the INSERT in sql/quality/01_data_quality_framework.sql.
 PIPELINE_CONFIG_SEED = [
-    SourceConfig("sql_ehr", "patients", "bronze_ehr_patients", "CDC", "_cdc_lsn", "patient_id", "dbo.patients", True, 98.0),
-    SourceConfig("sql_ehr", "encounters", "bronze_ehr_encounters", "CDC", "_cdc_lsn", "encounter_id", "dbo.encounters", True, 98.0),
-    SourceConfig("sql_ehr", "providers", "bronze_ehr_providers", "CDC", "_cdc_lsn", "provider_id", "dbo.providers", True, 99.0),
-    SourceConfig("sql_ehr", "diagnoses", "bronze_ehr_diagnoses", "CDC", "_cdc_lsn", "diagnosis_id", "dbo.diagnoses", True, 95.0),
-    SourceConfig("sql_ehr", "lab_results", "bronze_ehr_lab_results", "CDC", "_cdc_lsn", "lab_result_id", "dbo.lab_results", True, 95.0),
-    SourceConfig("sql_ehr", "medications", "bronze_ehr_medications", "CDC", "_cdc_lsn", "medication_order_id", "dbo.medications", True, 95.0),
-    SourceConfig("fhir_r4", "Patient", "bronze_fhir_patient", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 98.0),
-    SourceConfig("fhir_r4", "Encounter", "bronze_fhir_encounter", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 95.0),
-    SourceConfig("fhir_r4", "Observation", "bronze_fhir_observation", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 95.0),
-    SourceConfig("fhir_r4", "Condition", "bronze_fhir_condition", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 95.0),
-    SourceConfig("fhir_r4", "MedicationRequest", "bronze_fhir_medication_request", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 95.0),
-    SourceConfig("fhir_r4", "Practitioner", "bronze_fhir_practitioner", "Watermark", "meta_lastUpdated", "resource_id", "sample-data/fhir_r4/*.json", True, 99.0),
-    SourceConfig("claims_csv", "insurance_claims.csv", "bronze_claims", "Full", None, "claim_id", "sample-data/claims_csv/insurance_claims.csv", True, 95.0),
-    SourceConfig("claims_csv", "facility_info.csv", "bronze_facilities", "Full", None, "facility_id", "sample-data/claims_csv/facility_info.csv", True, 99.0),
+    SourceConfig(
+        "sql_ehr", "patients", "bronze_ehr_patients", "CDC", "_cdc_lsn", "patient_id", "dbo.patients", True, 98.0
+    ),
+    SourceConfig(
+        "sql_ehr",
+        "encounters",
+        "bronze_ehr_encounters",
+        "CDC",
+        "_cdc_lsn",
+        "encounter_id",
+        "dbo.encounters",
+        True,
+        98.0,
+    ),
+    SourceConfig(
+        "sql_ehr", "providers", "bronze_ehr_providers", "CDC", "_cdc_lsn", "provider_id", "dbo.providers", True, 99.0
+    ),
+    SourceConfig(
+        "sql_ehr", "diagnoses", "bronze_ehr_diagnoses", "CDC", "_cdc_lsn", "diagnosis_id", "dbo.diagnoses", True, 95.0
+    ),
+    SourceConfig(
+        "sql_ehr",
+        "lab_results",
+        "bronze_ehr_lab_results",
+        "CDC",
+        "_cdc_lsn",
+        "lab_result_id",
+        "dbo.lab_results",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "sql_ehr",
+        "medications",
+        "bronze_ehr_medications",
+        "CDC",
+        "_cdc_lsn",
+        "medication_order_id",
+        "dbo.medications",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "fhir_r4",
+        "Patient",
+        "bronze_fhir_patient",
+        "Watermark",
+        "meta_lastUpdated",
+        "resource_id",
+        "sample-data/fhir_r4/*.json",
+        True,
+        98.0,
+    ),
+    SourceConfig(
+        "fhir_r4",
+        "Encounter",
+        "bronze_fhir_encounter",
+        "Watermark",
+        "meta_lastUpdated",
+        "resource_id",
+        "sample-data/fhir_r4/*.json",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "fhir_r4",
+        "Observation",
+        "bronze_fhir_observation",
+        "Watermark",
+        "meta_lastUpdated",
+        "resource_id",
+        "sample-data/fhir_r4/*.json",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "fhir_r4",
+        "Condition",
+        "bronze_fhir_condition",
+        "Watermark",
+        "meta_lastUpdated",
+        "resource_id",
+        "sample-data/fhir_r4/*.json",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "fhir_r4",
+        "MedicationRequest",
+        "bronze_fhir_medication_request",
+        "Watermark",
+        "meta_lastUpdated",
+        "resource_id",
+        "sample-data/fhir_r4/*.json",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "fhir_r4",
+        "Practitioner",
+        "bronze_fhir_practitioner",
+        "Watermark",
+        "meta_lastUpdated",
+        "resource_id",
+        "sample-data/fhir_r4/*.json",
+        True,
+        99.0,
+    ),
+    SourceConfig(
+        "claims_csv",
+        "insurance_claims.csv",
+        "bronze_claims",
+        "Full",
+        None,
+        "claim_id",
+        "sample-data/claims_csv/insurance_claims.csv",
+        True,
+        95.0,
+    ),
+    SourceConfig(
+        "claims_csv",
+        "facility_info.csv",
+        "bronze_facilities",
+        "Full",
+        None,
+        "facility_id",
+        "sample-data/claims_csv/facility_info.csv",
+        True,
+        99.0,
+    ),
 ]
 
 
@@ -107,7 +227,8 @@ def ensure_pipeline_config(spark: SparkSession) -> None:
         return
     definition_columns = {c: f"s.{c}" for c in seed_df.columns if c != "active_flag"}
     (
-        DeltaTable.forPath(spark, PIPELINE_CONFIG_PATH).alias("t")
+        DeltaTable.forPath(spark, PIPELINE_CONFIG_PATH)
+        .alias("t")
         .merge(seed_df.alias("s"), "t.source_name = s.source_name AND t.source_table = s.source_table")
         .whenMatchedUpdate(set=definition_columns)
         .whenNotMatchedInsertAll()
@@ -116,8 +237,9 @@ def ensure_pipeline_config(spark: SparkSession) -> None:
     _SEEDED = True
 
 
-def load_source_configs(spark: SparkSession, source_name: str | None = None,
-                        source_table: str | None = None, active_only: bool = True) -> list[SourceConfig]:
+def load_source_configs(
+    spark: SparkSession, source_name: str | None = None, source_table: str | None = None, active_only: bool = True
+) -> list[SourceConfig]:
     ensure_pipeline_config(spark)
     df = spark.read.format("delta").load(PIPELINE_CONFIG_PATH)
     if active_only:
@@ -129,9 +251,13 @@ def load_source_configs(spark: SparkSession, source_name: str | None = None,
     configs = [SourceConfig(**row.asDict()) for row in df.orderBy("source_name", "source_table").collect()]
     for cfg in configs:
         if cfg.ingestion_type not in INGESTION_TYPES:
-            raise ValueError(f"pipeline_config {cfg.source_name}.{cfg.source_table}: unknown ingestion_type {cfg.ingestion_type!r}")
+            raise ValueError(
+                f"pipeline_config {cfg.source_name}.{cfg.source_table}: unknown ingestion_type {cfg.ingestion_type!r}"
+            )
         if cfg.ingestion_type != "Full" and not cfg.watermark_column:
-            raise ValueError(f"pipeline_config {cfg.source_name}.{cfg.source_table}: {cfg.ingestion_type} load needs a watermark_column")
+            raise ValueError(
+                f"pipeline_config {cfg.source_name}.{cfg.source_table}: {cfg.ingestion_type} load needs a watermark_column"
+            )
     return configs
 
 
@@ -153,7 +279,8 @@ def get_stage_watermark(spark: SparkSession, stage: str, table: str) -> str | No
     if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
         return None
     rows = (
-        spark.read.format("delta").load(WATERMARK_STATE_PATH)
+        spark.read.format("delta")
+        .load(WATERMARK_STATE_PATH)
         .filter((F.col("source_name") == stage) & (F.col("source_table") == table))
         .select("watermark_value")
         .collect()
@@ -165,8 +292,9 @@ def advance_stage_watermark(spark: SparkSession, stage: str, table: str, new_val
     _merge_watermark(spark, stage, table, new_value, stage, run_id)
 
 
-def _merge_watermark(spark: SparkSession, source_name: str, source_table: str, new_value: str,
-                     ingestion_type: str, run_id: str) -> None:
+def _merge_watermark(
+    spark: SparkSession, source_name: str, source_table: str, new_value: str, ingestion_type: str, run_id: str
+) -> None:
     update_df = spark.createDataFrame(
         [(source_name, source_table, new_value, ingestion_type, run_id)],
         "source_name STRING, source_table STRING, watermark_value STRING, ingestion_type STRING, last_pipeline_run_id STRING",
@@ -175,7 +303,8 @@ def _merge_watermark(spark: SparkSession, source_name: str, source_table: str, n
     if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
         spark.createDataFrame([], WATERMARK_STATE_SCHEMA).write.format("delta").save(WATERMARK_STATE_PATH)
     (
-        DeltaTable.forPath(spark, WATERMARK_STATE_PATH).alias("t")
+        DeltaTable.forPath(spark, WATERMARK_STATE_PATH)
+        .alias("t")
         .merge(update_df.alias("s"), "t.source_name = s.source_name AND t.source_table = s.source_table")
         .whenMatchedUpdateAll(condition="s.ingestion_type <> t.ingestion_type OR s.watermark_value > t.watermark_value")
         .whenNotMatchedInsertAll()
@@ -187,7 +316,8 @@ def get_watermark(spark: SparkSession, cfg: SourceConfig) -> str | None:
     if not DeltaTable.isDeltaTable(spark, WATERMARK_STATE_PATH):
         return None
     rows = (
-        spark.read.format("delta").load(WATERMARK_STATE_PATH)
+        spark.read.format("delta")
+        .load(WATERMARK_STATE_PATH)
         .filter((F.col("source_name") == cfg.source_name) & (F.col("source_table") == cfg.source_table))
         .select("watermark_value", "ingestion_type")
         .collect()
@@ -197,8 +327,10 @@ def get_watermark(spark: SparkSession, cfg: SourceConfig) -> str | None:
     # A timestamp watermark and an LSN watermark are not comparable. If the table's ingestion
     # type changed, the stored position means nothing: start over with a fresh full read.
     if rows[0]["ingestion_type"] != cfg.ingestion_type:
-        print(f"[WATERMARK] {cfg.source_name}.{cfg.source_table}: ingestion_type changed "
-              f"{rows[0]['ingestion_type']} -> {cfg.ingestion_type}; ignoring the stored watermark")
+        print(
+            f"[WATERMARK] {cfg.source_name}.{cfg.source_table}: ingestion_type changed "
+            f"{rows[0]['ingestion_type']} -> {cfg.ingestion_type}; ignoring the stored watermark"
+        )
         return None
     return rows[0]["watermark_value"]
 

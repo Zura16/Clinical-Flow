@@ -13,8 +13,8 @@ from databricks.gold.build_facts import patient_sk_as_of
 from databricks.gold.keys import UNKNOWN_SK
 from databricks.utilities.config import get_spark_session
 
-T0 = "2024-01-01 00:00:00"   # when both patients were last updated at source
-T1 = "2026-05-01 12:00:00"   # when patient 1 moves
+T0 = "2024-01-01 00:00:00"  # when both patients were last updated at source
+T1 = "2026-05-01 12:00:00"  # when patient 1 moves
 
 
 @pytest.fixture(scope="module")
@@ -28,16 +28,20 @@ def patients(spark, rows):
     Passed straight to build_dim_patient rather than written to silver_ehr_patients, so this test
     cannot disturb the tables the rest of the suite reads.
     """
-    df = spark.createDataFrame(rows, "patient_id STRING, address_street STRING, source_updated_at STRING, _is_deleted BOOLEAN")
+    df = spark.createDataFrame(
+        rows, "patient_id STRING, address_street STRING, source_updated_at STRING, _is_deleted BOOLEAN"
+    )
     return (
-        df
-        .withColumn("source_system", F.lit("sql_ehr"))
+        df.withColumn("source_system", F.lit("sql_ehr"))
         .withColumn("source_updated_at", F.col("source_updated_at").cast("timestamp"))
-        .withColumn("first_name", F.lit("Test")).withColumn("last_name", F.lit("Patient"))
+        .withColumn("first_name", F.lit("Test"))
+        .withColumn("last_name", F.lit("Patient"))
         .withColumn("date_of_birth", F.lit("1980-01-01").cast("date"))
         .withColumn("gender", F.lit("Female"))
-        .withColumn("city", F.lit("Seattle")).withColumn("state", F.lit("WA"))
-        .withColumn("postal_code", F.lit("98101")).withColumn("phone_number", F.lit(None).cast("string"))
+        .withColumn("city", F.lit("Seattle"))
+        .withColumn("state", F.lit("WA"))
+        .withColumn("postal_code", F.lit("98101"))
+        .withColumn("phone_number", F.lit(None).cast("string"))
         .withColumn("insurance_type", F.lit("Commercial"))
         .withColumn("_updated_at", F.current_timestamp())
         .withColumn("record_hash", F.sha2(F.concat_ws("||", "patient_id", "address_street"), 256))
@@ -52,7 +56,8 @@ def versions(spark, patient_id):
     arrive as 1899-12-31 and turn an assertion about UTC into an assertion about the test machine.
     """
     return (
-        spark.read.format("delta").load(gold_path("dim_patient"))
+        spark.read.format("delta")
+        .load(gold_path("dim_patient"))
         .filter(F.col("patient_id") == patient_id)
         .withColumn("start_utc", F.date_format("effective_start_date", "yyyy-MM-dd HH:mm:ss"))
         .withColumn("end_utc", F.date_format("effective_end_date", "yyyy-MM-dd HH:mm:ss"))
@@ -64,8 +69,9 @@ def versions(spark, patient_id):
 def test_scd2_lifecycle_and_point_in_time_join(spark):
     # 1. First build: one version per patient, opened at the beginning of time so that facts
     #    predating our first sight of the record still resolve.
-    build_dim_patient(spark, "scd2-run-1",
-                      patients(spark, [("P1", "1 Old St", T0, False), ("P2", "2 Elm St", T0, False)]))
+    build_dim_patient(
+        spark, "scd2-run-1", patients(spark, [("P1", "1 Old St", T0, False), ("P2", "2 Elm St", T0, False)])
+    )
 
     first = versions(spark, "P1")
     assert len(first) == 1
@@ -100,9 +106,9 @@ def test_scd2_lifecycle_and_point_in_time_join(spark):
         r["patient_id"] + "@" + str(r["event_time"].year): r["patient_sk"]
         for r in patient_sk_as_of(spark, events, F.col("patient_id"), F.col("event_time"), "sql_ehr").collect()
     }
-    assert resolved["P1@2025"] == old["patient_sk"]        # before the move: the old version
-    assert resolved["P1@2026"] == new["patient_sk"]        # after the move: the new version
-    assert resolved["P_unknown@2026"] == UNKNOWN_SK        # no such patient: the unknown member
+    assert resolved["P1@2025"] == old["patient_sk"]  # before the move: the old version
+    assert resolved["P1@2026"] == new["patient_sk"]  # after the move: the new version
+    assert resolved["P_unknown@2026"] == UNKNOWN_SK  # no such patient: the unknown member
 
     # 5. A deletion is a version too, so the warehouse records when the record went away.
     with_delete = patients(spark, [("P1", "9 New Ave", T1, False), ("P2", "2 Elm St", T1, True)])

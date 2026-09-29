@@ -46,6 +46,6 @@ def test_unknown_member_row_is_added_with_typed_columns(spark):
     df = spark.createDataFrame([(123, "Main St Clinic", 4.5)], "facility_sk LONG, facility_name STRING, score DOUBLE")
     rows = with_unknown_member(df, spark, "facility_sk").collect()
     unknown = next(r for r in rows if r["facility_sk"] == UNKNOWN_SK)
-    assert unknown["facility_name"] == "UNKNOWN"   # strings say so
-    assert unknown["score"] is None               # numbers stay NULL rather than pretending to be 0
+    assert unknown["facility_name"] == "UNKNOWN"  # strings say so
+    assert unknown["score"] is None  # numbers stay NULL rather than pretending to be 0
     assert len(rows) == 2

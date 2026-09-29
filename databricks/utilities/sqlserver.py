@@ -53,8 +53,12 @@ def settings() -> dict:
 def connection(database: str | None = None, autocommit: bool = True):
     cfg = settings()
     conn = pymssql.connect(
-        server=cfg["host"], port=str(cfg["port"]), user=cfg["user"], password=cfg["password"],
-        database=database if database is not None else cfg["database"], autocommit=autocommit,
+        server=cfg["host"],
+        port=str(cfg["port"]),
+        user=cfg["user"],
+        password=cfg["password"],
+        database=database if database is not None else cfg["database"],
+        autocommit=autocommit,
     )
     try:
         yield conn
@@ -63,24 +67,21 @@ def connection(database: str | None = None, autocommit: bool = True):
 
 
 def execute(sql: str, database: str | None = None) -> None:
-    with connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
+    with connection(database) as conn, conn.cursor() as cur:
+        cur.execute(sql)
 
 
 def query(sql: str, database: str | None = None) -> list[dict]:
-    with connection(database) as conn:
-        with conn.cursor(as_dict=True) as cur:
-            cur.execute(sql)
-            return cur.fetchall()
+    with connection(database) as conn, conn.cursor(as_dict=True) as cur:
+        cur.execute(sql)
+        return cur.fetchall()
 
 
 def scalar(sql: str, database: str | None = None):
-    with connection(database) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            row = cur.fetchone()
-            return row[0] if row else None
+    with connection(database) as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 def is_available() -> bool:
@@ -94,6 +95,7 @@ def is_available() -> bool:
 # ---------------------------------------------------------------------------
 # JDBC (Spark side)
 # ---------------------------------------------------------------------------
+
 
 def jdbc_options(database: str | None = None) -> dict:
     cfg = settings()
@@ -115,6 +117,7 @@ def read_query(spark, sql: str, database: str | None = None):
 # ---------------------------------------------------------------------------
 # CDC helpers
 # ---------------------------------------------------------------------------
+
 
 def capture_instance(table: str) -> str:
     return f"dbo_{table}"
@@ -180,6 +183,4 @@ def wait_for_capture(before: str | None = None, timeout_seconds: int = 120) -> s
 
 
 def cdc_enabled_tables() -> list[str]:
-    return [r["name"] for r in query(
-        "SELECT t.name FROM sys.tables t WHERE t.is_tracked_by_cdc = 1 ORDER BY t.name"
-    )]
+    return [r["name"] for r in query("SELECT t.name FROM sys.tables t WHERE t.is_tracked_by_cdc = 1 ORDER BY t.name")]

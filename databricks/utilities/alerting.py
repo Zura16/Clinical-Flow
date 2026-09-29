@@ -29,20 +29,23 @@ ALERT_TABLE_PATH = os.path.join(META_PATH, "pipeline_alert")
 WEBHOOK_ENV_VAR = "CLINICALFLOW_ALERT_WEBHOOK"
 WEBHOOK_TIMEOUT_SECONDS = 5
 
-ALERT_SCHEMA = StructType([
-    StructField("alert_key", StringType(), False),
-    StructField("pipeline_run_id", StringType(), False),
-    StructField("pipeline_name", StringType(), False),
-    StructField("severity", StringType(), False),
-    StructField("summary", StringType(), False),
-    StructField("detail", StringType(), True),
-    StructField("next_step", StringType(), True),
-    StructField("raised_at", StringType(), False),
-])
+ALERT_SCHEMA = StructType(
+    [
+        StructField("alert_key", StringType(), False),
+        StructField("pipeline_run_id", StringType(), False),
+        StructField("pipeline_name", StringType(), False),
+        StructField("severity", StringType(), False),
+        StructField("summary", StringType(), False),
+        StructField("detail", StringType(), True),
+        StructField("next_step", StringType(), True),
+        StructField("raised_at", StringType(), False),
+    ]
+)
 
 
-def _print_alert(pipeline_name: str, run_id: str, severity: str, summary: str,
-                 detail: str | None, next_step: str | None) -> None:
+def _print_alert(
+    pipeline_name: str, run_id: str, severity: str, summary: str, detail: str | None, next_step: str | None
+) -> None:
     line = "!" * 78
     print(f"\n{line}\n[{severity}] {pipeline_name} failed (run {run_id})\n  {summary}")
     if detail:
@@ -67,9 +70,15 @@ def _post_webhook(payload: dict) -> None:
         print(f"[ALERT] webhook delivery failed ({type(exc).__name__}); the alert is still recorded")
 
 
-def raise_alert(spark: SparkSession, run_id: str, pipeline_name: str, summary: str,
-                detail: str | None = None, next_step: str | None = None,
-                severity: str = "ERROR") -> None:
+def raise_alert(
+    spark: SparkSession,
+    run_id: str,
+    pipeline_name: str,
+    summary: str,
+    detail: str | None = None,
+    next_step: str | None = None,
+    severity: str = "ERROR",
+) -> None:
     """Record and deliver an alert. Failures here are reported, never raised."""
     _print_alert(pipeline_name, run_id, severity, summary, detail, next_step)
     try:
@@ -79,7 +88,12 @@ def raise_alert(spark: SparkSession, run_id: str, pipeline_name: str, summary: s
             "detail STRING, next_step STRING",
         ).select(
             F.sha2(F.concat_ws("||", "pipeline_run_id", "pipeline_name", "summary"), 256).alias("alert_key"),
-            "pipeline_run_id", "pipeline_name", "severity", "summary", "detail", "next_step",
+            "pipeline_run_id",
+            "pipeline_name",
+            "severity",
+            "summary",
+            "detail",
+            "next_step",
             F.date_format(F.current_timestamp(), "yyyy-MM-dd HH:mm:ss.SSSSSS").alias("raised_at"),
         )
         if not DeltaTable.isDeltaTable(spark, ALERT_TABLE_PATH):
@@ -88,14 +102,21 @@ def raise_alert(spark: SparkSession, run_id: str, pipeline_name: str, summary: s
             # Keyed on run + pipeline + summary, so a retried run does not re-page anyone for the
             # same failure.
             (
-                DeltaTable.forPath(spark, ALERT_TABLE_PATH).alias("t")
+                DeltaTable.forPath(spark, ALERT_TABLE_PATH)
+                .alias("t")
                 .merge(row.alias("s"), "t.alert_key = s.alert_key")
                 .whenNotMatchedInsertAll()
                 .execute()
             )
-        _post_webhook({
-            "run_id": run_id, "pipeline": pipeline_name, "severity": severity,
-            "summary": summary, "detail": detail, "next_step": next_step,
-        })
+        _post_webhook(
+            {
+                "run_id": run_id,
+                "pipeline": pipeline_name,
+                "severity": severity,
+                "summary": summary,
+                "detail": detail,
+                "next_step": next_step,
+            }
+        )
     except Exception as exc:  # noqa: BLE001 - reporting must not replace the original failure
         print(f"[ALERT] could not record the alert ({type(exc).__name__}: {exc})")

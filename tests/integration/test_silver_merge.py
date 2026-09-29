@@ -8,7 +8,13 @@ import os
 import pytest
 from pyspark.sql import functions as F
 
-from databricks.silver.silver_engine import SilverSpec, collapse_batch, merge_into_silver, to_silver_columns, version_expr
+from databricks.silver.silver_engine import (
+    SilverSpec,
+    collapse_batch,
+    merge_into_silver,
+    to_silver_columns,
+    version_expr,
+)
 from databricks.utilities.config import SILVER_PATH, get_spark_session
 from databricks.utilities.control import SourceConfig
 
@@ -38,8 +44,9 @@ def spark():
 
 def raw_cdc(spark, rows):
     """Bronze-shaped CDC rows: (patient_id, address, lsn, seqval, operation)."""
-    df = spark.createDataFrame(rows, "patient_id STRING, address_street STRING, _cdc_lsn STRING, "
-                                     "_cdc_seqval STRING, _cdc_operation INT")
+    df = spark.createDataFrame(
+        rows, "patient_id STRING, address_street STRING, _cdc_lsn STRING, " "_cdc_seqval STRING, _cdc_operation INT"
+    )
     df = df.withColumn("_ingested_at", F.current_timestamp()).withColumn("_pipeline_run_id", F.lit("t"))
     return df.withColumn("_version", version_expr(CDC_CFG))
 
@@ -55,14 +62,24 @@ def silver_rows(spark, spec):
 
 
 def test_insert_then_version_guarded_update(spark):
-    merge_into_silver(spark, cdc_batch(spark, [
-        ("p1", "1 Old St", "00000000000000000010", "0" * 20, 2),
-        ("p2", "2 Elm St", "00000000000000000010", "0" * 20, 2),
-    ]), SPEC, CDC_CFG)
+    merge_into_silver(
+        spark,
+        cdc_batch(
+            spark,
+            [
+                ("p1", "1 Old St", "00000000000000000010", "0" * 20, 2),
+                ("p2", "2 Elm St", "00000000000000000010", "0" * 20, 2),
+            ],
+        ),
+        SPEC,
+        CDC_CFG,
+    )
     assert {k: r["address_street"] for k, r in silver_rows(spark, SPEC).items()} == {"p1": "1 Old St", "p2": "2 Elm St"}
 
     # A newer log position updates the row.
-    merge_into_silver(spark, cdc_batch(spark, [("p1", "9 New Ave", "00000000000000000020", "0" * 20, 4)]), SPEC, CDC_CFG)
+    merge_into_silver(
+        spark, cdc_batch(spark, [("p1", "9 New Ave", "00000000000000000020", "0" * 20, 4)]), SPEC, CDC_CFG
+    )
     assert silver_rows(spark, SPEC)["p1"]["address_street"] == "9 New Ave"
 
     # An older log position (a replayed or out-of-order batch) must not win.
@@ -83,10 +100,16 @@ def test_cdc_delete_is_soft(spark):
 
 def test_collapse_keeps_last_change_in_a_batch(spark):
     # One batch containing insert then update for the same key collapses to the update.
-    collapsed = collapse_batch(raw_cdc(spark, [
-        ("p9", "first", "00000000000000000040", "0" * 20, 2),
-        ("p9", "second", "00000000000000000041", "0" * 20, 4),
-    ]), ["patient_id"])
+    collapsed = collapse_batch(
+        raw_cdc(
+            spark,
+            [
+                ("p9", "first", "00000000000000000040", "0" * 20, 2),
+                ("p9", "second", "00000000000000000041", "0" * 20, 4),
+            ],
+        ),
+        ["patient_id"],
+    )
     assert collapsed.count() == 1
     assert collapsed.first()["address_street"] == "second"
 

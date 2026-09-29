@@ -35,9 +35,9 @@ from databricks.utilities.quality_rules import (
     DATA_QUALITY_RULE_PATH,
     DATA_QUALITY_RULE_SCHEMA,
     QualityRule,
+    ensure_rules,
 )
 from databricks.utilities.quality_rules import clear_caches as clear_rule_caches
-from databricks.utilities.quality_rules import ensure_rules
 
 BRONZE_TABLE = "bronze_recovery_test"
 DATASET = "dq_recovery_test"
@@ -62,17 +62,20 @@ def control_rows(spark):
     ensure_pipeline_config(spark)
     # active_flag=False: silver looks the row up by destination table regardless, but bronze only
     # ingests active rows, so a whole-pipeline run in the same lakehouse ignores this fixture.
-    config = SourceConfig("claims_csv", "recovery_test", BRONZE_TABLE, "Full", None, "record_id",
-                          "unused-by-this-test", active_flag=False)
-    spark.createDataFrame([config.__dict__], PIPELINE_CONFIG_SCHEMA) \
-        .write.format("delta").mode("append").save(PIPELINE_CONFIG_PATH)
+    config = SourceConfig(
+        "claims_csv", "recovery_test", BRONZE_TABLE, "Full", None, "record_id", "unused-by-this-test", active_flag=False
+    )
+    spark.createDataFrame([config.__dict__], PIPELINE_CONFIG_SCHEMA).write.format("delta").mode("append").save(
+        PIPELINE_CONFIG_PATH
+    )
     clear_caches()
 
     ensure_rules(spark)
     DeltaTable.forPath(spark, DATA_QUALITY_RULE_PATH).delete(F.col("dataset_name") == DATASET)
     rule = QualityRule(DATASET, "result_value", "RANGE", "result_value BETWEEN 0 AND 100", "ERROR", 10.0, True)
-    spark.createDataFrame([rule.__dict__], DATA_QUALITY_RULE_SCHEMA) \
-        .write.format("delta").mode("append").save(DATA_QUALITY_RULE_PATH)
+    spark.createDataFrame([rule.__dict__], DATA_QUALITY_RULE_SCHEMA).write.format("delta").mode("append").save(
+        DATA_QUALITY_RULE_PATH
+    )
     clear_rule_caches()
 
 

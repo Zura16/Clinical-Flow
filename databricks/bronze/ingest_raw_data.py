@@ -49,26 +49,23 @@ FHIR_BUNDLE_SCHEMA = "resourceType STRING, entry ARRAY<STRUCT<resource: STRING>>
 # Source readers (I/O)
 # ---------------------------------------------------------------------------
 
-def read_csv_source(spark: SparkSession, location: str, cfg: SourceConfig) -> DataFrame:
+
+def read_csv_source(spark: SparkSession, location: str, _cfg: SourceConfig) -> DataFrame:
+    """Read a CSV extract. _cfg is unused here but part of the shared reader signature."""
     # No inferSchema: every column lands as STRING exactly as the source wrote it.
-    return (
-        spark.read.option("header", "true").csv(location)
-        .withColumn("_source_file", F.col("_metadata.file_path"))
-    )
+    return spark.read.option("header", "true").csv(location).withColumn("_source_file", F.col("_metadata.file_path"))
 
 
 def read_fhir_source(spark: SparkSession, location: str, cfg: SourceConfig) -> DataFrame:
-    bundles = (
-        spark.read.text(location, wholetext=True)
-        .select(F.from_json("value", FHIR_BUNDLE_SCHEMA).alias("bundle"), F.col("_metadata.file_path").alias("_source_file"))
+    bundles = spark.read.text(location, wholetext=True).select(
+        F.from_json("value", FHIR_BUNDLE_SCHEMA).alias("bundle"), F.col("_metadata.file_path").alias("_source_file")
     )
     unparseable = bundles.filter(F.col("bundle").isNull() | F.col("bundle.entry").isNull()).count()
     if unparseable:
         raise ValueError(f"{unparseable} FHIR bundle file(s) under {location} could not be parsed as a Bundle")
 
     return (
-        bundles
-        .select(F.explode("bundle.entry.resource").alias("resource_json"), "_source_file")
+        bundles.select(F.explode("bundle.entry.resource").alias("resource_json"), "_source_file")
         .select(
             F.get_json_object("resource_json", "$.resourceType").alias("resource_type"),
             F.get_json_object("resource_json", "$.id").alias("resource_id"),
@@ -106,15 +103,19 @@ def read_cdc_increment(spark: SparkSession, cfg: SourceConfig, wm_start: str | N
     columns = mssql.select_list(table)
 
     if wm_start is None:
-        sql = (f"SELECT '{to_lsn}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
-               f"{CDC_SNAPSHOT} AS _cdc_operation, {columns} FROM dbo.{table}")
+        sql = (
+            f"SELECT '{to_lsn}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
+            f"{CDC_SNAPSHOT} AS _cdc_operation, {columns} FROM dbo.{table}"
+        )
         return mssql.read_query(spark, sql), to_lsn
 
     from_lsn = mssql.increment_lsn(wm_start)
     if from_lsn > to_lsn:
         # Nothing has been written to the log since the last run.
-        empty = (f"SELECT '{wm_start}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
-                 f"{CDC_SNAPSHOT} AS _cdc_operation, {columns} FROM dbo.{table} WHERE 1 = 0")
+        empty = (
+            f"SELECT '{wm_start}' AS _cdc_lsn, '{mssql.ZERO_LSN}' AS _cdc_seqval, "
+            f"{CDC_SNAPSHOT} AS _cdc_operation, {columns} FROM dbo.{table} WHERE 1 = 0"
+        )
         return mssql.read_query(spark, empty), wm_start
 
     min_lsn = mssql.min_lsn(table)
@@ -146,6 +147,7 @@ def read_source(spark: SparkSession, cfg: SourceConfig) -> DataFrame:
 # Pure transforms
 # ---------------------------------------------------------------------------
 
+
 def watermark_ts(watermark_column: str):
     return F.try_to_timestamp(F.col(watermark_column))
 
@@ -169,8 +171,7 @@ def max_watermark(df: DataFrame, watermark_column: str) -> str | None:
 
 def add_bronze_metadata(df: DataFrame, run_id: str, cfg: SourceConfig) -> DataFrame:
     return (
-        df
-        .withColumn("_pipeline_run_id", F.lit(run_id))
+        df.withColumn("_pipeline_run_id", F.lit(run_id))
         .withColumn("_source_name", F.lit(cfg.source_name))
         .withColumn("_ingested_at", F.current_timestamp())
         .withColumn("_ingest_date", F.current_date())
@@ -181,7 +182,8 @@ def add_bronze_metadata(df: DataFrame, run_id: str, cfg: SourceConfig) -> DataFr
 # Restart support
 # ---------------------------------------------------------------------------
 
-def run_partition_exists(spark: SparkSession, target: str, run_id: str) -> bool:
+
+def run_partition_exists(target: str, run_id: str) -> bool:
     """Whether this run already wrote a partition, by listing directories.
 
     A Spark query to answer this costs ~1.7s; the partition layout makes it a directory check.
@@ -201,7 +203,8 @@ def find_successful_attempt(spark: SparkSession, run_id: str, pipeline_name: str
     if not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
         return None
     return (
-        spark.read.format("delta").load(AUDIT_TABLE_PATH)
+        spark.read.format("delta")
+        .load(AUDIT_TABLE_PATH)
         .filter(
             (F.col("pipeline_run_id") == run_id)
             & (F.col("pipeline_name") == pipeline_name)
@@ -216,6 +219,7 @@ def find_successful_attempt(spark: SparkSession, run_id: str, pipeline_name: str
 # Orchestration
 # ---------------------------------------------------------------------------
 
+
 def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
     pipeline_name = f"bronze:{cfg.destination_table}"
     logger = PipelineLogger(spark, run_id, pipeline_name, cfg.source_name, "BRONZE")
@@ -226,9 +230,15 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         if previous is not None:
             if previous["watermark_end"] is not None:
                 advance_watermark(spark, cfg, previous["watermark_end"], run_id)  # no-op unless a crash skipped it
-            logger.log_run(watermark_start=previous["watermark_start"], watermark_end=previous["watermark_end"],
-                           status="SKIPPED", error_message="run ID already landed this table; partition left untouched")
-            print(f"[BRONZE] {cfg.destination_table}: run {run_id} already landed {previous['rows_inserted']} rows; skipped")
+            logger.log_run(
+                watermark_start=previous["watermark_start"],
+                watermark_end=previous["watermark_end"],
+                status="SKIPPED",
+                error_message="run ID already landed this table; partition left untouched",
+            )
+            print(
+                f"[BRONZE] {cfg.destination_table}: run {run_id} already landed {previous['rows_inserted']} rows; skipped"
+            )
             return previous["rows_inserted"]
 
         # CDC builds its own query; other sources read a file.
@@ -242,7 +252,9 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         else:
             bad = count_bad_watermarks(source_df, cfg.watermark_column)
             if bad:
-                raise ValueError(f"{bad} row(s) in {cfg.source_location} have a missing or unparseable {cfg.watermark_column}")
+                raise ValueError(
+                    f"{bad} row(s) in {cfg.source_location} have a missing or unparseable {cfg.watermark_column}"
+                )
             wm_start = get_watermark(spark, cfg)
             increment = select_increment(source_df, cfg.watermark_column, wm_start)
 
@@ -254,7 +266,7 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         # An empty increment with nothing already written for this run has nothing to commit.
         # A Delta commit costs seconds, and on an idle run that is most of the run's cost.
         # The exception is a retry whose earlier attempt did write: that partition must be replaced.
-        if rows or run_partition_exists(spark, target, run_id):
+        if rows or run_partition_exists(target, run_id):
             (
                 landed.write.format("delta")
                 .mode("overwrite")
@@ -264,26 +276,40 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
             )
         landed.unpersist()
 
-        logger.log_run(rows_read=rows, rows_inserted=rows, watermark_start=wm_start, watermark_end=wm_end, status="SUCCESS")
+        logger.log_run(
+            rows_read=rows, rows_inserted=rows, watermark_start=wm_start, watermark_end=wm_end, status="SUCCESS"
+        )
         # The watermark moves last: only once the rows are committed and the run is recorded.
         if wm_end is not None:
             advance_watermark(spark, cfg, wm_end, run_id)
-        print(f"[BRONZE] {cfg.destination_table}: landed {rows} rows ({cfg.ingestion_type}, window {wm_start} -> {wm_end})")
+        print(
+            f"[BRONZE] {cfg.destination_table}: landed {rows} rows ({cfg.ingestion_type}, window {wm_start} -> {wm_end})"
+        )
         return rows
     except Exception as exc:
-        logger.log_run(watermark_start=wm_start, status="FAILED", error_code=type(exc).__name__, error_message=str(exc)[:2000])
+        logger.log_run(
+            watermark_start=wm_start, status="FAILED", error_code=type(exc).__name__, error_message=str(exc)[:2000]
+        )
         raise_alert(
-            spark, run_id, pipeline_name,
+            spark,
+            run_id,
+            pipeline_name,
             summary=f"{type(exc).__name__}: {str(exc)[:300]}",
             detail=f"bronze table {cfg.destination_table} from {cfg.source_name}.{cfg.source_table}",
-            next_step=(f"fix the cause, then rerun with --run-id {run_id}: tables this run already landed "
-                       f"are skipped and this one resumes from the current watermark"),
+            next_step=(
+                f"fix the cause, then rerun with --run-id {run_id}: tables this run already landed "
+                f"are skipped and this one resumes from the current watermark"
+            ),
         )
         raise
 
 
-def run_bronze_ingestion(spark: SparkSession | None = None, run_id: str | None = None,
-                         source_name: str | None = None, source_table: str | None = None) -> str:
+def run_bronze_ingestion(
+    spark: SparkSession | None = None,
+    run_id: str | None = None,
+    source_name: str | None = None,
+    source_table: str | None = None,
+) -> str:
     spark = spark or get_spark_session("ClinicalFlow_Bronze_Ingestion")
     run_id = run_id or f"run-{uuid.uuid4().hex[:10]}"
     if not RUN_ID_PATTERN.match(run_id):
@@ -310,7 +336,9 @@ def run_bronze_ingestion(spark: SparkSession | None = None, run_id: str | None =
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-id", help="reuse a run ID to restart it: tables it already landed are skipped, failed ones retried")
+    parser.add_argument(
+        "--run-id", help="reuse a run ID to restart it: tables it already landed are skipped, failed ones retried"
+    )
     parser.add_argument("--source", help="limit to one source_name")
     parser.add_argument("--table", help="limit to one source_table")
     args = parser.parse_args()
