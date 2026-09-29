@@ -39,10 +39,11 @@ jobs:
           java-version: "17"
       - name: Cache Spark/Delta jars
         # configure_spark_with_delta_pip resolves the Delta and JDBC jars from Maven on first use;
-        # without this the download runs on every job.
+        # without this the download runs on every job. Spark 4 keeps its Ivy cache in ~/.ivy2.5.2,
+        # not ~/.ivy2: caching the old path saved nothing and the post step warned it was missing.
         uses: actions/cache@v4
         with:
-          path: ~/.ivy2
+          path: ~/.ivy2.5.2
           key: ivy-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
