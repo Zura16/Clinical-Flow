@@ -71,3 +71,11 @@ Dated journal of what landed. Newest last.
   - `.github/workflows/ci.yml`: lint + full suite on a small generated dataset; SQL Server tests skip with reasons. Simulated locally in a clean copy: 29 passed, 2 skipped, 2:25.
   - `.github/workflows/nightly-integration.yml`: SQL Server service container with Agent (CDC), loader falls back to client-side inserts when `/data` is not mounted, then the full suite and the failure demo.
   - `scripts/maintain_lakehouse.py`: OPTIMIZE always, VACUUM only on `--vacuum`. Active files 481 -> 75, row counts identical on all 45 tables. Bronze does not compact (partitioned by run ID) - see decisions.
+
+## 2026-09-29
+
+- Fix plan step 8 proven on GitHub, completing the fix plan:
+  - `ci.yml` green on the PR (29 passed, 2 skipped with reasons, 5:55 of tests).
+  - `nightly-integration.yml` green end to end: SQL Server container, client-side load fallback, 31 tests with 0 skipped, full lakehouse build, failure demo with all nine checks passing.
+  - Fixed along the way: the demo now refuses to start without a built lakehouse; the nightly builds it first; the jar cache now points at Spark 4's `~/.ivy2.5.2`.
+  - Troubleshooting scenario 6: a weak SA password kills the service container before any step runs.

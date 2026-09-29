@@ -64,6 +64,26 @@ def table_count(spark, root, table, live_only: bool = False) -> int:
     return df.count()
 
 
+# The proof reconciles gold to silver, so the demo needs a built lakehouse. table_count reads a
+# missing table as 0, which would let the demo corrupt the source and only crash at the last step.
+REQUIRED_TABLES = [
+    (GOLD_PATH, "dim_patient"),
+    (GOLD_PATH, "fact_observation"),
+    (SILVER_PATH, "silver_fhir_observations"),
+]
+
+
+def require_built_lakehouse() -> None:
+    import os
+
+    missing = [table for root, table in REQUIRED_TABLES if not os.path.isdir(os.path.join(root, table, "_delta_log"))]
+    if missing:
+        raise SystemExit(
+            f"the demo needs a built lakehouse, missing: {', '.join(missing)}\n"
+            "run bronze, both silver jobs, build_dimensions and build_facts first (see README)"
+        )
+
+
 def snapshot(spark) -> dict:
     return {
         "source lab_results": mssql.scalar("SELECT COUNT(*) FROM dbo.lab_results"),
@@ -152,6 +172,7 @@ def run_demo(bad_rows: int = 500) -> None:
     spark.sparkContext.setLogLevel("ERROR")
     if not mssql.is_available():
         raise SystemExit("SQL Server is not reachable: docker compose up -d sqlserver")
+    require_built_lakehouse()
 
     run_baseline = f"demo-baseline-{uuid.uuid4().hex[:6]}"
     run_bad = f"demo-bad-{uuid.uuid4().hex[:6]}"

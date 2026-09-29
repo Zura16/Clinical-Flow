@@ -107,3 +107,18 @@ See the daylight-saving finding in `docs/decisions.md` for what this looked like
 Note when debugging interactively: PySpark converts timestamps to the **driver's local zone** on
 `collect()`, so a stored `1900-01-01` UTC prints as `1899-12-31 16:00`. Compare with
 `date_format(col, 'yyyy-MM-dd HH:mm:ss')` computed in Spark instead.
+
+## Scenario 6: the nightly workflow fails with every step skipped
+
+Symptoms: the `cdc` job is red, `Initialize containers` failed, and every step after it shows as
+skipped. None of the pipeline code ran.
+
+The SQL Server service container never became healthy, and the reason is only in the
+`Initialize containers` log. Search it for `ERROR:`. The one seen so far:
+
+    ERROR: Unable to set system administrator password: Password validation failed.
+
+SQL Server shuts itself down when `MSSQL_SA_PASSWORD` does not meet its policy: at least 8
+characters, from three of uppercase, lowercase, digits and symbols. Update the repository secret
+(Settings -> Secrets and variables -> Actions) and dispatch the workflow again. The secret's name
+must be exactly `MSSQL_SA_PASSWORD`; under any other name the workflow silently uses its fallback.
