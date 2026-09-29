@@ -167,3 +167,26 @@ Reading and parsing *all* 22 FHIR bundles takes **3.2 s total**, so the six FHIR
 **Finding: compaction cannot fix bronze, by design.** `maintain_lakehouse` (OPTIMIZE, VACUUM only on `--vacuum`) took the active file count from **481 to 75** with **all 45 tables' row counts identical** before and after (1:28). But every bronze table kept its file count (`bronze_ehr_lab_results` 17 → 17). OPTIMIZE bin-packs *within* a partition, and bronze is partitioned by `_pipeline_run_id`, so each run's files are a floor. That is the price of replay-by-run-partition. At scale the answer is a coarser partition (date only) with run ID as a column, and the replay then becomes `replaceWhere _pipeline_run_id = X`.
 **The real small-file offender was metadata:** `pipeline_run_audit` went from 301 active files to 1 (603 on disk), `data_quality_result` 53 → 1, `watermark_state` 22 → 1 (208 on disk). Every stage appends one row to one of these, so they grow fastest and are read on every run.
 **Interview version:** "CI splits by dependency: lint and the full suite run on every push against a generated dataset, and the SQL Server CDC path runs nightly in a service container. When I added compaction, the file count dropped from 481 to 75 with identical row counts, but bronze didn't compact at all. OPTIMIZE can't merge across partitions, and I partition bronze by run ID for replay, so that was a tradeoff I'd made without noticing its cost. The biggest offender turned out to be the audit table, which grows one small file per stage."
+
+## 2026-09-29 — What the first nightly runs found
+
+**The demo assumed a built lakehouse and never checked.** CI's tests use a temporary lakehouse, so
+the real one was empty when the demo ran. `table_count` reads a missing table as 0, so the demo
+corrupted the source, recovered correctly, and only crashed reading `gold/fact_observation` at the
+final check. **Fix:** `require_built_lakehouse()` runs before the source is touched, and the nightly
+workflow builds the lakehouse (bronze, both silver jobs, dims, facts) in the operator's order first.
+That step is also the only end-to-end run against a real SQL Server outside the tests.
+**The insert fallback worked on its first run** (it could never run locally): all six tables loaded
+with batched client-side inserts, and **31 tests passed with 0 skipped** (12:32). This was the first time the CDC and
+whole-pipeline tests ran anywhere but one laptop.
+**A weak SA password stops SQL Server before any step runs.** The container logs `Password
+validation failed` and shuts down; the job page only shows every step skipped. Now scenario 6 in
+the troubleshooting guide.
+**The jar cache never saved.** Spark 4 keeps its Ivy cache in `~/.ivy2.5.2`, not `~/.ivy2`, so
+both workflows cached a directory that never existed and downloaded the Delta and JDBC jars on every run.
+**Verified:** nightly run 36604789450 green end to end: all nine demo checks pass, and
+`fact_observation` 4,039 = live labs 2,551 + live FHIR 1,488.
+**Interview version:** "The first nightly run failed in the demo, not the pipeline: the demo read a
+missing gold table as zero rows and only crashed at its last check. I made it verify its
+precondition before touching the source, and had CI build the lakehouse the way an operator would.
+That also gave me my first end-to-end run against a real SQL Server in CI."

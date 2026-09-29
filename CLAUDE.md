@@ -107,13 +107,13 @@ venv/bin/ruff check . && venv/bin/black --check .               # lint
 - [x] **5. Data quality** — rules from `data_quality_rule`, missing rule types, thresholds that fail the run, idempotent quarantine
 - [x] **6. Gold** — stable SKs, unknown members, point-in-time SCD2 fact joins, missing dims/facts, no fabricated metrics
 - [x] **7. Failure demo** — a real failure, `FAILED` audit + alert, replay only the failed partition
-- [ ] **8. Tests + CI** — behavior-asserting tests on a temp lakehouse; GitHub Actions running lint + tests
+- [x] **8. Tests + CI** — behavior-asserting tests on a temp lakehouse; GitHub Actions running lint + tests
 
 ## Current status
 
 > Keep this section SHORT (≤ 15 lines). Narrative goes to `docs/history.md`.
 
-- **Phase:** steps 1-7 ✅. Step 8 **landed locally (2026-09-28), not yet proven on GitHub**: ruff+black clean, `ci.yml` simulated in a clean copy (29 pass / 2 skip, 2:25), `maintain_lakehouse` 481 → 75 active files with identical row counts. **Next:** push, get `ci.yml` green, run `nightly-integration.yml` by `workflow_dispatch` (its client-side insert fallback has never executed), set the `MSSQL_SA_PASSWORD` repo secret, then tick step 8.
+- **Phase:** **fix plan complete** (steps 1-8 ✅, 2026-09-29). CI green on GitHub: `ci.yml` (lint + 29 tests, 2 SQL Server skips) on every push/PR; `nightly-integration.yml` (SQL Server container, 31 tests / 0 skips, full lakehouse build, failure demo 9/9) nightly + dispatch. `maintain_lakehouse`: 481 → 75 active files, row counts identical. **CI rule:** `MSSQL_SA_PASSWORD` repo secret must meet SQL Server's policy or the container dies before any step (troubleshooting scenario 6).
 - **Bronze semantics (don't regress):** succeeded run ID is SKIPPED, never re-extracted; failed run ID retries from the current watermark; write → SUCCESS audit → watermark. LSN watermarks for CDC; retention gaps fail the run. SQL Server date/time columns convert to ISO text **in SQL** — never let JDBC apply the JVM's zone.
 - **Silver semantics (don't regress):** stage watermark over bronze `_ingested_at`; collapse per source key; MERGE guarded by `s._version > t._version`; soft deletes; gold reads via `gold/silver_reader.py`.
 - **Quality semantics (don't regress):** rules from `data_quality_rule`; severity decides the row, threshold decides the run; quarantine merged on `quarantine_key`; results written for passes too; soft-deleted rows skipped.
