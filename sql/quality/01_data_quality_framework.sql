@@ -14,7 +14,7 @@ CREATE TABLE dbo.pipeline_config (
     source_name             VARCHAR(100) NOT NULL,
     source_table            VARCHAR(100) NOT NULL,
     destination_table       VARCHAR(100) NOT NULL,
-    ingestion_type          VARCHAR(30) NOT NULL, -- Full, Watermark, CDC
+    ingestion_type          VARCHAR(30) NOT NULL, -- Full, Watermark, CDC, FileIncremental
     watermark_column        VARCHAR(100) NULL,    -- required unless ingestion_type = 'Full'
     primary_key_columns     VARCHAR(500) NOT NULL,
     source_location         VARCHAR(500) NOT NULL, -- file path/glob or connection-relative object name
@@ -56,6 +56,19 @@ CREATE TABLE dbo.watermark_state (
     last_pipeline_run_id    VARCHAR(100) NOT NULL,
     updated_at              DATETIME2 DEFAULT GETUTCDATE(),
     CONSTRAINT pk_watermark_state PRIMARY KEY (source_name, source_table)
+);
+
+-- 1c. File Ingest Log (which files each FileIncremental table has read).
+-- A file counts as ingested only when its run has a SUCCESS audit row for the table: the audit
+-- row is the commit marker. Mirrors databricks/utilities/file_log.py.
+CREATE TABLE dbo.file_ingest_log (
+    destination_table       VARCHAR(100) NOT NULL,
+    file_path               VARCHAR(1000) NOT NULL,
+    file_size               BIGINT NOT NULL,
+    file_modification_time  DATETIME2 NOT NULL,
+    pipeline_run_id         VARCHAR(100) NOT NULL,
+    logged_at               DATETIME2 DEFAULT GETUTCDATE(),
+    CONSTRAINT pk_file_ingest_log PRIMARY KEY (destination_table, file_path, file_size, file_modification_time, pipeline_run_id)
 );
 
 -- 2. Data Quality Rules Table

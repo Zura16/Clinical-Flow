@@ -20,7 +20,10 @@ from databricks.utilities.config import META_PATH
 PIPELINE_CONFIG_PATH = os.path.join(META_PATH, "pipeline_config")
 WATERMARK_STATE_PATH = os.path.join(META_PATH, "watermark_state")
 
-INGESTION_TYPES = {"Full", "Watermark", "CDC"}
+# Full: every run lands the whole source. Watermark: rows past a stored timestamp.
+# CDC: changes past a stored log position. FileIncremental: every row of files not yet ingested
+# (databricks/utilities/file_log.py), whatever their timestamps, so a late file is never dropped.
+INGESTION_TYPES = {"Full", "Watermark", "CDC", "FileIncremental"}
 
 # pipeline_config is reconciled with the seed once per process, not once per lookup: the seed
 # MERGE is a Spark job, and measuring showed it dominated per-table cost (9.8s of every lookup).
@@ -48,6 +51,15 @@ class SourceConfig:
     @property
     def primary_keys(self) -> list[str]:
         return [c.strip() for c in self.primary_key_columns.split(",")]
+
+    @property
+    def versioned_by_watermark_column(self) -> bool:
+        """Whether a row's own watermark_column says how new it is, rather than when it landed.
+
+        FileIncremental lands late files whose rows can be older than rows already landed, so
+        ordering them by arrival would let a stale version overwrite a newer one.
+        """
+        return self.ingestion_type in {"Watermark", "FileIncremental"}
 
 
 PIPELINE_CONFIG_SCHEMA = StructType(
