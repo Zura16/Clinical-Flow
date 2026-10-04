@@ -79,3 +79,11 @@ Dated journal of what landed. Newest last.
   - `nightly-integration.yml` green end to end: SQL Server container, client-side load fallback, 31 tests with 0 skipped, full lakehouse build, failure demo with all nine checks passing.
   - Fixed along the way: the demo now refuses to start without a built lakehouse; the nightly builds it first; the jar cache now points at Spark 4's `~/.ivy2.5.2`.
   - Troubleshooting scenario 6: a weak SA password kills the service container before any step runs.
+
+## 2026-10-03
+
+- FileIncremental ingestion for FHIR (first post-fix-plan item):
+  - Found: a late FHIR export with older `meta_lastUpdated` values landed 0 rows with a SUCCESS audit row. Reproduced as a failing test before the fix.
+  - `metadata/file_ingest_log` + `databricks/utilities/file_log.py`: files listed with `binaryFile` (no content read), pending = not committed for this table, committed = run has a SUCCESS audit row.
+  - Silver versions FileIncremental rows by `meta_lastUpdated` (mutation-verified test); `current_state` rejects unknown types; `ingest_table` rejects unknown types instead of crashing.
+  - Real lakehouse: migration run re-landed all FHIR once (silver inserted 0, updated 0, counts identical); second run read 0 of 22 files, 51 s -> 31 s.

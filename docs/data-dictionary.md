@@ -9,10 +9,25 @@
 | `source_name` | VARCHAR(100) | NOT NULL | Source system identifier (`sql_ehr`, `fhir_r4`, `claims_csv`) |
 | `source_table` | VARCHAR(100) | NOT NULL | Source entity name |
 | `destination_table` | VARCHAR(100) | NOT NULL | Bronze Delta table target |
-| `ingestion_type` | VARCHAR(30) | NOT NULL | Load mechanism (`Full`, `Watermark`, `CDC`) |
-| `watermark_column` | VARCHAR(100) | NULL | Column used for incremental watermark tracking |
+| `ingestion_type` | VARCHAR(30) | NOT NULL | Load mechanism (`Full`, `Watermark`, `CDC`, `FileIncremental`) |
+| `watermark_column` | VARCHAR(100) | NULL | Column used for incremental watermark tracking; for `FileIncremental`, the record's own version timestamp (orders versions in silver, filters nothing in bronze) |
 | `primary_key_columns` | VARCHAR(500) | NOT NULL | Primary key(s) |
 | `active_flag` | BIT | DEFAULT 1 | Active status flag |
+
+### `file_ingest_log`
+Which source files each `FileIncremental` bronze table has read. **Grain:** one row per
+(`destination_table`, `file_path`, `file_size`, `file_modification_time`, `pipeline_run_id`).
+A file counts as ingested only when its run has a `SUCCESS` row in `pipeline_run_audit` for
+`bronze:<destination_table>`; entries from runs that never succeeded are ignored.
+
+| Column Name | Data Type | Constraint | Description |
+|---|---|---|---|
+| `destination_table` | VARCHAR(100) | PK | Bronze table that read the file |
+| `file_path` | VARCHAR(1000) | PK | File URI as the filesystem lists it |
+| `file_size` | BIGINT | PK | Size in bytes when read |
+| `file_modification_time` | DATETIME2 | PK | mtime when read; a changed size or mtime makes the file pending again |
+| `pipeline_run_id` | VARCHAR(100) | PK | Run that read it (joins to `pipeline_run_audit`) |
+| `logged_at` | DATETIME2 | NOT NULL | When the entry was written |
 
 ### `quarantine_records`
 | Column Name | Data Type | Constraint | Description |
