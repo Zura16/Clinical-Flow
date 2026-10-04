@@ -35,6 +35,7 @@ from databricks.utilities import sqlserver as mssql
 from databricks.utilities.alerting import raise_alert
 from databricks.utilities.config import BASE_DIR, BRONZE_PATH, get_spark_session
 from databricks.utilities.control import SourceConfig, advance_watermark, get_watermark, load_source_configs
+from databricks.utilities.file_log import files_to_ingest, record_files
 from databricks.utilities.logger import AUDIT_TABLE_PATH, PipelineLogger
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -50,19 +51,19 @@ FHIR_BUNDLE_SCHEMA = "resourceType STRING, entry ARRAY<STRUCT<resource: STRING>>
 # ---------------------------------------------------------------------------
 
 
-def read_csv_source(spark: SparkSession, location: str, _cfg: SourceConfig) -> DataFrame:
+def read_csv_source(spark: SparkSession, location: str | list[str], _cfg: SourceConfig) -> DataFrame:
     """Read a CSV extract. _cfg is unused here but part of the shared reader signature."""
     # No inferSchema: every column lands as STRING exactly as the source wrote it.
     return spark.read.option("header", "true").csv(location).withColumn("_source_file", F.col("_metadata.file_path"))
 
 
-def read_fhir_source(spark: SparkSession, location: str, cfg: SourceConfig) -> DataFrame:
+def read_fhir_source(spark: SparkSession, location: str | list[str], cfg: SourceConfig) -> DataFrame:
     bundles = spark.read.text(location, wholetext=True).select(
         F.from_json("value", FHIR_BUNDLE_SCHEMA).alias("bundle"), F.col("_metadata.file_path").alias("_source_file")
     )
     unparseable = bundles.filter(F.col("bundle").isNull() | F.col("bundle.entry").isNull()).count()
     if unparseable:
-        raise ValueError(f"{unparseable} FHIR bundle file(s) under {location} could not be parsed as a Bundle")
+        raise ValueError(f"{unparseable} FHIR bundle file(s) in {cfg.source_location} could not be parsed as a Bundle")
 
     return (
         bundles.select(F.explode("bundle.entry.resource").alias("resource_json"), "_source_file")
@@ -136,11 +137,16 @@ def read_cdc_increment(spark: SparkSession, cfg: SourceConfig, wm_start: str | N
     return mssql.read_query(spark, sql), to_lsn
 
 
-def read_source(spark: SparkSession, cfg: SourceConfig) -> DataFrame:
+def source_glob(cfg: SourceConfig) -> str:
+    return os.path.join(BASE_DIR, cfg.source_location)
+
+
+def read_source(spark: SparkSession, cfg: SourceConfig, files: list[str] | None = None) -> DataFrame:
+    """Read the whole source, or only the given files of it (FileIncremental)."""
     reader = SOURCE_READERS.get(cfg.source_name)
     if reader is None:
         raise ValueError(f"no reader registered for source_name {cfg.source_name!r}")
-    return reader(spark, os.path.join(BASE_DIR, cfg.source_location), cfg)
+    return reader(spark, files if files is not None else source_glob(cfg), cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +169,12 @@ def count_bad_watermarks(df: DataFrame, watermark_column: str) -> int:
     """Rows whose watermark is missing or unparseable. They can never be selected by a
     watermark filter, so ingesting around them would drop them silently."""
     return df.filter(watermark_ts(watermark_column).isNull()).count()
+
+
+def require_parseable_watermarks(df: DataFrame, cfg: SourceConfig) -> None:
+    bad = count_bad_watermarks(df, cfg.watermark_column)
+    if bad:
+        raise ValueError(f"{bad} row(s) in {cfg.source_location} have a missing or unparseable {cfg.watermark_column}")
 
 
 def max_watermark(df: DataFrame, watermark_column: str) -> str | None:
@@ -241,40 +253,54 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
             )
             return previous["rows_inserted"]
 
-        # CDC builds its own query; other sources read a file.
-        source_df = read_source(spark, cfg) if cfg.ingestion_type != "CDC" else None
-
+        wm_end = None
+        new_files = []
         if cfg.ingestion_type == "Full":
-            increment, wm_end = source_df, None
+            increment = read_source(spark, cfg)
         elif cfg.ingestion_type == "CDC":
             wm_start = get_watermark(spark, cfg)
             increment, wm_end = read_cdc_increment(spark, cfg, wm_start)
-        else:
-            bad = count_bad_watermarks(source_df, cfg.watermark_column)
-            if bad:
-                raise ValueError(
-                    f"{bad} row(s) in {cfg.source_location} have a missing or unparseable {cfg.watermark_column}"
-                )
+        elif cfg.ingestion_type == "Watermark":
+            source_df = read_source(spark, cfg)
+            require_parseable_watermarks(source_df, cfg)
             wm_start = get_watermark(spark, cfg)
             increment = select_increment(source_df, cfg.watermark_column, wm_start)
+        elif cfg.ingestion_type == "FileIncremental":
+            # Every row of every file not yet ingested lands: no timestamp filter, so a late file
+            # whose rows are older than what bronze already holds is kept, not silently dropped.
+            new_files, total_files = files_to_ingest(spark, source_glob(cfg), cfg.destination_table)
+            print(f"[BRONZE] {cfg.destination_table}: {len(new_files)} of {total_files} file(s) not yet ingested")
+            increment = read_source(spark, cfg, [f["file_path"] for f in new_files]) if new_files else None
+            if increment is not None:
+                # Silver orders versions by this column, so a row without one could never be placed.
+                require_parseable_watermarks(increment, cfg)
+        else:
+            raise ValueError(f"unknown ingestion_type {cfg.ingestion_type!r}")
 
-        landed = add_bronze_metadata(increment, run_id, cfg).cache()
-        rows = landed.count()
-        if cfg.ingestion_type == "Watermark":
-            wm_end = max_watermark(landed, cfg.watermark_column) if rows else wm_start
+        rows = 0
+        if increment is not None:
+            landed = add_bronze_metadata(increment, run_id, cfg).cache()
+            rows = landed.count()
+            if cfg.ingestion_type == "Watermark":
+                wm_end = max_watermark(landed, cfg.watermark_column) if rows else wm_start
 
-        # An empty increment with nothing already written for this run has nothing to commit.
-        # A Delta commit costs seconds, and on an idle run that is most of the run's cost.
-        # The exception is a retry whose earlier attempt did write: that partition must be replaced.
-        if rows or run_partition_exists(target, run_id):
-            (
-                landed.write.format("delta")
-                .mode("overwrite")
-                .option("replaceWhere", f"_pipeline_run_id = '{run_id}'")
-                .partitionBy("_ingest_date", "_pipeline_run_id")
-                .save(target)
-            )
-        landed.unpersist()
+            # An empty increment with nothing already written for this run has nothing to commit.
+            # A Delta commit costs seconds, and on an idle run that is most of the run's cost.
+            # The exception is a retry whose earlier attempt did write: that partition must be replaced.
+            if rows or run_partition_exists(target, run_id):
+                (
+                    landed.write.format("delta")
+                    .mode("overwrite")
+                    .option("replaceWhere", f"_pipeline_run_id = '{run_id}'")
+                    .partitionBy("_ingest_date", "_pipeline_run_id")
+                    .save(target)
+                )
+            landed.unpersist()
+
+        # Logged even when a file held no rows for this table, or it would be re-read forever.
+        # The entries only count once the SUCCESS audit row below exists.
+        if new_files:
+            record_files(spark, cfg.destination_table, run_id, new_files)
 
         logger.log_run(
             rows_read=rows, rows_inserted=rows, watermark_start=wm_start, watermark_end=wm_end, status="SUCCESS"
