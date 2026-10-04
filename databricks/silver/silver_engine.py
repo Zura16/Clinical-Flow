@@ -72,7 +72,7 @@ def version_expr(cfg: SourceConfig):
     """
     if cfg.ingestion_type == "CDC":
         return F.concat(F.col("_cdc_lsn"), F.col("_cdc_seqval"))
-    if cfg.ingestion_type == "Watermark":
+    if cfg.versioned_by_watermark_column:
         return F.coalesce(
             F.date_format(F.try_to_timestamp(F.col(cfg.watermark_column)), WATERMARK_FORMAT),
             F.date_format(F.col("_ingested_at"), WATERMARK_FORMAT),
