@@ -35,6 +35,27 @@ To disable a source, set `active_flag = false` on its `pipeline_config` row. Res
 
 Date-range backfill from the source *(planned)*.
 
+### Forcing a file-based source to be read again
+FHIR (`FileIncremental`) and claims/facilities (`Full`) decide what to read from
+`metadata/file_ingest_log`, which identifies a file by path, size and modification time. A file
+rewritten in place with the same size and mtime looks unchanged and is not read. To force a read:
+
+1. Preferred: change the mtime. The next run sees a new file version and reads it.
+   ```bash
+   touch sample-data/fhir_r4/<bundle>.json
+   ```
+2. If the landing zone is read-only, delete the file's entries for that table instead:
+   ```python
+   from delta.tables import DeltaTable
+   DeltaTable.forPath(spark, "delta_lakehouse/metadata/file_ingest_log").delete(
+       "destination_table = 'bronze_fhir_observation' AND file_path LIKE '%<bundle>.json'"
+   )
+   ```
+
+Either way, the next run lands every row of the file again as a new bronze partition. For FHIR,
+silver keeps the newest version of each resource by `meta_lastUpdated`, so re-landing an
+unchanged resource changes nothing downstream.
+
 ## 4. Failure and Recovery Demonstration
 Corrupts 500 lab results at source, fails a real quality gate, shows the evidence, repairs the
 source, replays the stage, and verifies nothing was duplicated or lost:
