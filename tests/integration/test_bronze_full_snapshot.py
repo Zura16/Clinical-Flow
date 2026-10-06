@@ -71,17 +71,32 @@ def test_full_snapshot_lands_only_when_the_file_changes(spark, cfg, source_csv):
     assert ingest_table(spark, cfg, "run-4") == 2
     assert current_claims(spark, cfg) == {"c1": "100", "c2": "200"}
 
-    # 5. The extract disappears: the run fails loudly instead of treating it as "nothing changed"
+    # 5. A header-only extract fails the run. Landing it would either change nothing (no rows, no
+    #    partition) or, as an empty snapshot, soft-delete every claim. A second run fails too, so
+    #    the file was never logged as read and cannot pass later as "unchanged".
+    source_csv.write_text(HEADER)
+    with pytest.raises(ValueError, match="0 rows"):
+        ingest_table(spark, cfg, "run-5")
+    with pytest.raises(ValueError, match="0 rows"):
+        ingest_table(spark, cfg, "run-6")
+    assert statuses(spark, cfg, "run-5") == ["FAILED"]
+    assert current_claims(spark, cfg) == {"c1": "100", "c2": "200"}
+
+    # 6. The extract disappears: the run fails loudly instead of treating it as "nothing changed"
     #    or as an empty snapshot that would delete every claim downstream.
     source_csv.unlink()
     with pytest.raises(Exception, match="(?i)path does not exist|PATH_NOT_FOUND"):
-        ingest_table(spark, cfg, "run-5")
-    statuses = (
+        ingest_table(spark, cfg, "run-7")
+    assert statuses(spark, cfg, "run-7") == ["FAILED"]
+    assert landed_by_run(spark, cfg) == {"run-1": 2, "run-3": 1, "run-4": 2}
+
+
+def statuses(spark, cfg, run_id: str) -> list[str]:
+    rows = (
         spark.read.format("delta")
         .load(AUDIT_TABLE_PATH)
-        .filter((F.col("pipeline_run_id") == "run-5") & (F.col("pipeline_name") == f"bronze:{cfg.destination_table}"))
+        .filter((F.col("pipeline_run_id") == run_id) & (F.col("pipeline_name") == f"bronze:{cfg.destination_table}"))
         .select("execution_status")
         .collect()
     )
-    assert [r["execution_status"] for r in statuses] == ["FAILED"]
-    assert landed_by_run(spark, cfg) == {"run-1": 2, "run-3": 1, "run-4": 2}
+    return [r["execution_status"] for r in rows]

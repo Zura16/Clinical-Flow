@@ -265,6 +265,11 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
                 increment = None
             else:
                 increment = read_source(spark, cfg)
+                # An empty snapshot would land nothing, so the previous snapshot would stay current;
+                # treated as a real snapshot it would soft-delete every key. Both are silent, so a
+                # 0-row extract fails the run, before anything is written or logged as read.
+                if increment.isEmpty():
+                    raise ValueError(f"{cfg.source_location} has 0 rows; refusing to land an empty snapshot")
                 new_files = present
         elif cfg.ingestion_type == "CDC":
             wm_start = get_watermark(spark, cfg)
