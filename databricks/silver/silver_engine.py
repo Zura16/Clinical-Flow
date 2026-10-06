@@ -141,8 +141,15 @@ def merge_into_silver(spark: SparkSession, batch: DataFrame, spec: SilverSpec, c
     merge = (
         target.alias("t")
         .merge(batch.alias("s"), condition)
-        # The version guard: an older version can never overwrite a newer one.
-        .whenMatchedUpdateAll(condition="s._version > t._version")
+        # The version guard: an older version can never overwrite a newer one. A newer version only
+        # rewrites the row when its content (record_hash) or delete state changed; otherwise only
+        # _version moves, so _updated_at keeps meaning "the content changed".
+        .whenMatchedUpdateAll(
+            condition="s._version > t._version AND (s.record_hash <> t.record_hash OR s._is_deleted <> t._is_deleted)"
+        )
+        # _version must still advance. Left behind, a late older version would pass the guard and
+        # overwrite content that is newer than it.
+        .whenMatchedUpdate(condition="s._version > t._version", set={"_version": "s._version"})
         .whenNotMatchedInsertAll()
     )
     if cfg.ingestion_type == "Full":

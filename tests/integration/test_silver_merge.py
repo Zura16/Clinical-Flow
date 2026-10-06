@@ -158,3 +158,47 @@ def test_late_file_with_an_older_version_does_not_win(spark):
     # timestamp keeps the newer one.
     merge_into_silver(spark, file_batch(spark, [("p1", "1 Old St", "2024-01-01T00:00:00Z")]), FILE_SPEC, FILE_CFG)
     assert silver_rows(spark, FILE_SPEC)["p1"]["address_street"] == "9 New Ave"
+
+
+HASH_SPEC = SilverSpec(
+    name="silver_merge_test_hash",
+    bronze_table="bronze_ehr_patients",
+    key_columns=["patient_id"],
+    columns={"patient_id": "patient_id", "address_street": "address_street"},
+    hash_columns=["patient_id", "address_street"],
+)
+
+
+def hash_batch(spark, rows):
+    return to_silver_columns(collapse_batch(raw_cdc(spark, rows), ["patient_id"]), HASH_SPEC, CDC_CFG)
+
+
+def lsn(n: int) -> str:
+    return f"{n:020d}"
+
+
+def test_unchanged_content_advances_the_version_but_is_not_an_update(spark):
+    def merge(address, position, operation=4):
+        merge_into_silver(
+            spark, hash_batch(spark, [("p1", address, lsn(position), "0" * 20, operation)]), HASH_SPEC, CDC_CFG
+        )
+        return silver_rows(spark, HASH_SPEC)["p1"]
+
+    first = merge("A", 10, operation=2)
+
+    # Same content at a newer version: the row's content and _updated_at stay as they were, but its
+    # version moves to 20.
+    same = merge("A", 20)
+    assert same["address_street"] == "A"
+    assert same["_updated_at"] == first["_updated_at"]
+    assert same["_version"] == lsn(20) + "0" * 20
+
+    # A late, out-of-order version 15 must still lose. Had the version stayed at 10 because the
+    # content was unchanged, 15 > 10 and the older B would overwrite the newer A.
+    assert merge("B", 15)["address_street"] == "A"
+
+    # Real changes still apply, and a delete applies even though its values are unchanged.
+    changed = merge("C", 30)
+    assert changed["address_street"] == "C" and changed["_updated_at"] > first["_updated_at"]
+    deleted = merge("C", 40, operation=1)
+    assert deleted["_is_deleted"] is True and deleted["address_street"] == "C"
