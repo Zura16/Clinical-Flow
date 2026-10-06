@@ -128,3 +128,33 @@ def test_full_snapshot_soft_deletes_missing_keys(spark):
     rows = silver_rows(spark, FULL_SPEC)
     assert rows["f2"]["_is_deleted"] is True and rows["f2"]["facility_name"] == "Valley"
     assert rows["f1"]["_is_deleted"] is False
+
+
+FILE_CFG = SourceConfig(
+    "fhir_r4", "Patient", "bronze_fhir_patient", "FileIncremental", "meta_lastUpdated", "patient_id", "x/*.json"
+)
+FILE_SPEC = SilverSpec(
+    name="silver_merge_test_file_patients",
+    bronze_table="bronze_fhir_patient",
+    key_columns=["patient_id"],
+    columns={"patient_id": "patient_id", "address_street": "address_street"},
+    hash_columns=["patient_id", "address_street"],
+)
+
+
+def file_batch(spark, rows):
+    """Bronze-shaped FileIncremental rows: (patient_id, address, meta_lastUpdated), landed now."""
+    df = spark.createDataFrame(rows, "patient_id STRING, address_street STRING, meta_lastUpdated STRING")
+    df = df.withColumn("_ingested_at", F.current_timestamp()).withColumn("_pipeline_run_id", F.lit("t"))
+    df = df.withColumn("_version", version_expr(FILE_CFG))
+    return to_silver_columns(collapse_batch(df, ["patient_id"]), FILE_SPEC, FILE_CFG)
+
+
+def test_late_file_with_an_older_version_does_not_win(spark):
+    merge_into_silver(spark, file_batch(spark, [("p1", "9 New Ave", "2024-06-01T00:00:00Z")]), FILE_SPEC, FILE_CFG)
+
+    # A late file lands after it, so its _ingested_at is newer, but its record is older. Versioning
+    # by landing time would let it overwrite the newer address; versioning by the record's own
+    # timestamp keeps the newer one.
+    merge_into_silver(spark, file_batch(spark, [("p1", "1 Old St", "2024-01-01T00:00:00Z")]), FILE_SPEC, FILE_CFG)
+    assert silver_rows(spark, FILE_SPEC)["p1"]["address_street"] == "9 New Ave"

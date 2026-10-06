@@ -4,7 +4,8 @@ Read the current state of a source table out of append-only bronze.
 Bronze holds every version ever landed, one partition per run. Silver wants one row per business
 key, so this module collapses bronze using the table's pipeline_config row:
 
-- Watermark loads: latest version per primary key (highest watermark, then latest landing).
+- Watermark and FileIncremental loads: latest version per primary key (highest watermark, then
+  latest landing). Never by landing time alone: a late file can carry an older version.
 - CDC loads: latest change per primary key by log position, then drop keys whose last change was
   a delete (__$operation = 1). The delete row stays in bronze as the evidence it happened.
 - Full loads: every run is a complete snapshot, so the current state is the newest snapshot.
@@ -52,7 +53,9 @@ def current_state(df: DataFrame, cfg: SourceConfig) -> DataFrame:
         return latest_snapshot(df)
     if cfg.ingestion_type == "CDC":
         return latest_cdc_state(df, cfg.primary_keys)
-    return latest_per_key(df, cfg.primary_keys, cfg.watermark_column)
+    if cfg.versioned_by_watermark_column:
+        return latest_per_key(df, cfg.primary_keys, cfg.watermark_column)
+    raise ValueError(f"no current-state rule for ingestion_type {cfg.ingestion_type!r}")
 
 
 def bronze_exists(destination_table: str) -> bool:
