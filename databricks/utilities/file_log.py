@@ -55,10 +55,10 @@ def list_source_files(spark: SparkSession, location: str) -> DataFrame:
     )
 
 
-def committed_files(spark: SparkSession, destination_table: str) -> DataFrame:
-    """Files this table has ingested in a run that succeeded."""
+def committed_entries(spark: SparkSession, destination_table: str) -> DataFrame:
+    """Log entries of this table whose run succeeded: the only entries that count."""
     if not DeltaTable.isDeltaTable(spark, FILE_INGEST_LOG_PATH) or not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
-        return spark.createDataFrame([], FILE_INGEST_LOG_SCHEMA).select(*FILE_IDENTITY)
+        return spark.createDataFrame([], FILE_INGEST_LOG_SCHEMA)
     succeeded = (
         spark.read.format("delta")
         .load(AUDIT_TABLE_PATH)
@@ -71,9 +71,28 @@ def committed_files(spark: SparkSession, destination_table: str) -> DataFrame:
         .load(FILE_INGEST_LOG_PATH)
         .filter(F.col("destination_table") == destination_table)
         .join(succeeded, "pipeline_run_id")
-        .select(*FILE_IDENTITY)
-        .distinct()
     )
+
+
+def committed_files(spark: SparkSession, destination_table: str) -> DataFrame:
+    """Files this table has ingested in any run that succeeded (the FileIncremental rule)."""
+    return committed_entries(spark, destination_table).select(*FILE_IDENTITY).distinct()
+
+
+def latest_committed_files(spark: SparkSession, destination_table: str) -> tuple[str | None, set[tuple]]:
+    """(run ID, file identities) of the newest successful run that logged files for this table.
+
+    The Full rule. A snapshot source has one current state, so "unchanged" means "the same as what
+    was last landed", not "the same as anything ever landed": a file restored from a backup with
+    its old size and mtime matches an older entry, and must still land.
+    """
+    entries = committed_entries(spark, destination_table)
+    newest = entries.orderBy(F.col("logged_at").desc()).select("pipeline_run_id").first()
+    if newest is None:
+        return None, set()
+    run_id = newest["pipeline_run_id"]
+    files = entries.filter(F.col("pipeline_run_id") == run_id).select(*FILE_IDENTITY).collect()
+    return run_id, {tuple(f) for f in files}
 
 
 def files_to_ingest(spark: SparkSession, location: str, destination_table: str) -> tuple[list[Row], int]:

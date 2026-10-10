@@ -35,7 +35,7 @@ from databricks.utilities import sqlserver as mssql
 from databricks.utilities.alerting import raise_alert
 from databricks.utilities.config import BASE_DIR, BRONZE_PATH, get_spark_session
 from databricks.utilities.control import SourceConfig, advance_watermark, get_watermark, load_source_configs
-from databricks.utilities.file_log import files_to_ingest, record_files
+from databricks.utilities.file_log import files_to_ingest, latest_committed_files, list_source_files, record_files
 from databricks.utilities.logger import AUDIT_TABLE_PATH, PipelineLogger
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -256,7 +256,21 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         wm_end = None
         new_files = []
         if cfg.ingestion_type == "Full":
-            increment = read_source(spark, cfg)
+            # Listing a missing extract raises, so a vanished file fails the run rather than
+            # passing as "unchanged" or landing as an empty snapshot.
+            present = list_source_files(spark, source_glob(cfg)).collect()
+            last_run, last_files = latest_committed_files(spark, cfg.destination_table)
+            if {tuple(f) for f in present} == last_files:
+                print(f"[BRONZE] {cfg.destination_table}: source unchanged since run {last_run}; nothing to land")
+                increment = None
+            else:
+                increment = read_source(spark, cfg)
+                # An empty snapshot would land nothing, so the previous snapshot would stay current;
+                # treated as a real snapshot it would soft-delete every key. Both are silent, so a
+                # 0-row extract fails the run, before anything is written or logged as read.
+                if increment.isEmpty():
+                    raise ValueError(f"{cfg.source_location} has 0 rows; refusing to land an empty snapshot")
+                new_files = present
         elif cfg.ingestion_type == "CDC":
             wm_start = get_watermark(spark, cfg)
             increment, wm_end = read_cdc_increment(spark, cfg, wm_start)

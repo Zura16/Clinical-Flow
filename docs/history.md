@@ -87,3 +87,10 @@ Dated journal of what landed. Newest last.
   - `metadata/file_ingest_log` + `databricks/utilities/file_log.py`: files listed with `binaryFile` (no content read), pending = not committed for this table, committed = run has a SUCCESS audit row.
   - Silver versions FileIncremental rows by `meta_lastUpdated` (mutation-verified test); `current_state` rejects unknown types; `ingest_table` rejects unknown types instead of crashing.
   - Real lakehouse: migration run re-landed all FHIR once (silver inserted 0, updated 0, counts identical); second run read 0 of 22 files, 51 s -> 31 s.
+
+## 2026-10-06
+
+- PR #3 (FileIncremental FHIR) merged after CI and the SQL Server nightly passed (33 passed, 0 skipped; demo 9/9).
+- Full loads skip unchanged extracts: compared against the latest successful run's files in `file_ingest_log`; a restored older file lands; a missing file fails. Idle claims run 24.6 s -> 19.0 s, 0 rows instead of 20,005.
+- Found: the silver MERGE never checks `record_hash`, so every Full snapshot rewrote all 20,000 silver claims. Logged as an open decision.
+- Runbook: how to force a file-based source to be read again (`touch`, or delete its log entries).
