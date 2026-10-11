@@ -94,3 +94,8 @@ Dated journal of what landed. Newest last.
 - Full loads skip unchanged extracts: compared against the latest successful run's files in `file_ingest_log`; a restored older file lands; a missing file fails. Idle claims run 24.6 s -> 19.0 s, 0 rows instead of 20,005.
 - Found: the silver MERGE never checks `record_hash`, so every Full snapshot rewrote all 20,000 silver claims. Logged as an open decision.
 - Runbook: how to force a file-based source to be read again (`touch`, or delete its log entries).
+
+## 2026-10-10
+
+- PR #4 merged (Full loads skip unchanged extracts; a 0-row extract fails the run). CI and the SQL Server nightly green (34 passed, 0 skipped).
+- Silver MERGE now rewrites a row only when `record_hash` or `_is_deleted` changed, and advances `_version` otherwise. Mutation-verified: a plain hash check lets a late older version overwrite newer data.
