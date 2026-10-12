@@ -223,11 +223,35 @@ PIPELINE_CONFIG_SEED = [
 ]
 
 
+# active_flag is operational (an operator turns a table off); every other column is a definition.
+OPERATIONAL_COLUMNS = {"active_flag"}
+CONFIG_KEY = ("source_name", "source_table")
+
+
+def seed_drift(table_rows: list[dict], seed: list[SourceConfig]) -> bool:
+    """Whether any seed row is missing from the table or differs from it in a definition column.
+
+    Rows the seed does not know about are not drift: the MERGE never deletes them either.
+    """
+    by_key = {tuple(r[k] for k in CONFIG_KEY): r for r in table_rows}
+    for config in seed:
+        wanted = asdict(config)
+        current = by_key.get(tuple(wanted[k] for k in CONFIG_KEY))
+        if current is None:
+            return True
+        if any(current[c] != v for c, v in wanted.items() if c not in OPERATIONAL_COLUMNS):
+            return True
+    return False
+
+
 def ensure_pipeline_config(spark: SparkSession) -> None:
     """Create pipeline_config from the seed, or reconcile it with the seed.
 
-    The seed defines HOW a source is ingested, so those columns are refreshed on every run.
+    The seed defines HOW a source is ingested, so a definition that differs from it is refreshed.
     active_flag is operational, not definitional: an operator turning a table off keeps it off.
+
+    The MERGE runs only when a definition differs. Run unconditionally it cost ~9 s per process
+    and wrote a new table version on every run, all of them identical.
     """
     global _SEEDED
     if _SEEDED:
@@ -237,7 +261,11 @@ def ensure_pipeline_config(spark: SparkSession) -> None:
         seed_df.write.format("delta").save(PIPELINE_CONFIG_PATH)
         _SEEDED = True
         return
-    definition_columns = {c: f"s.{c}" for c in seed_df.columns if c != "active_flag"}
+    current = [r.asDict() for r in spark.read.format("delta").load(PIPELINE_CONFIG_PATH).collect()]
+    if not seed_drift(current, PIPELINE_CONFIG_SEED):
+        _SEEDED = True
+        return
+    definition_columns = {c: f"s.{c}" for c in seed_df.columns if c not in OPERATIONAL_COLUMNS}
     (
         DeltaTable.forPath(spark, PIPELINE_CONFIG_PATH)
         .alias("t")
