@@ -99,3 +99,10 @@ Dated journal of what landed. Newest last.
 
 - PR #4 merged (Full loads skip unchanged extracts; a 0-row extract fails the run). CI and the SQL Server nightly green (34 passed, 0 skipped).
 - Silver MERGE now rewrites a row only when `record_hash` or `_is_deleted` changed, and advances `_version` otherwise. Mutation-verified: a plain hash check lets a late older version overwrite newer data.
+- PR #5 merged (silver rewrites a row only when content changed). CI 33 passed / 2 skipped; nightly 35 passed / 0 skipped.
+
+## 2026-10-12
+
+- `pipeline_config` is MERGEd only when the seed differs (`seed_drift`, unit-tested); runs no longer write the control table.
+- Negative result: no speed-up (A/B idle FHIR 27.1 s old vs 27.8 s new). The per-step profile had charged JVM warm-up to the first step. Measurement rule recorded: alternating A/B runs only.
+- Bronze reads the audit table once per run (`read_audit_snapshot`) instead of twice per table. A/B idle FHIR 28.9 s -> 20.4 s, same files read.

@@ -26,9 +26,10 @@ import argparse
 import os
 import re
 import uuid
+from dataclasses import dataclass
 
 from delta.tables import DeltaTable
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame, Row, SparkSession
 from pyspark.sql import functions as F
 
 from databricks.utilities import sqlserver as mssql
@@ -210,35 +211,55 @@ def run_partition_exists(target: str, run_id: str) -> bool:
     )
 
 
-def find_successful_attempt(spark: SparkSession, run_id: str, pipeline_name: str):
-    """The audit row of this run ID's successful attempt at this table, or None."""
-    if not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
-        return None
-    return (
-        spark.read.format("delta")
-        .load(AUDIT_TABLE_PATH)
-        .filter(
-            (F.col("pipeline_run_id") == run_id)
-            & (F.col("pipeline_name") == pipeline_name)
-            & (F.col("execution_status") == "SUCCESS")
-        )
-        .orderBy(F.col("end_timestamp").desc())
-        .first()
-    )
-
-
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
 
-def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
+@dataclass(frozen=True)
+class AuditSnapshot:
+    """The audit answers every bronze table of a run needs, read once per run.
+
+    previous: this run ID's latest successful attempt per pipeline. succeeded: every successful
+    run ID per pipeline, which decides which file-log entries count.
+    """
+
+    previous: dict[str, Row]
+    succeeded: dict[str, set[str]]
+
+
+def read_audit_snapshot(spark: SparkSession, run_id: str) -> AuditSnapshot:
+    if not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
+        return AuditSnapshot({}, {})
+    rows = (
+        spark.read.format("delta")
+        .load(AUDIT_TABLE_PATH)
+        .filter(F.col("pipeline_name").startswith("bronze:") & (F.col("execution_status") == "SUCCESS"))
+        .select(
+            "pipeline_name", "pipeline_run_id", "rows_inserted", "watermark_start", "watermark_end", "end_timestamp"
+        )
+        .collect()
+    )
+    previous: dict[str, Row] = {}
+    succeeded: dict[str, set[str]] = {}
+    for r in rows:
+        succeeded.setdefault(r["pipeline_name"], set()).add(r["pipeline_run_id"])
+        if r["pipeline_run_id"] == run_id:
+            held = previous.get(r["pipeline_name"])
+            if held is None or r["end_timestamp"] > held["end_timestamp"]:
+                previous[r["pipeline_name"]] = r
+    return AuditSnapshot(previous, succeeded)
+
+
+def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str, audit: AuditSnapshot | None = None) -> int:
     pipeline_name = f"bronze:{cfg.destination_table}"
     logger = PipelineLogger(spark, run_id, pipeline_name, cfg.source_name, "BRONZE")
     target = os.path.join(BRONZE_PATH, cfg.destination_table)
     wm_start = None
     try:
-        previous = find_successful_attempt(spark, run_id, pipeline_name)
+        audit = audit or read_audit_snapshot(spark, run_id)
+        previous = audit.previous.get(pipeline_name)
+        succeeded_runs = audit.succeeded.get(pipeline_name, set())
         if previous is not None:
             if previous["watermark_end"] is not None:
                 advance_watermark(spark, cfg, previous["watermark_end"], run_id)  # no-op unless a crash skipped it
@@ -259,7 +280,7 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
             # Listing a missing extract raises, so a vanished file fails the run rather than
             # passing as "unchanged" or landing as an empty snapshot.
             present = list_source_files(spark, source_glob(cfg)).collect()
-            last_run, last_files = latest_committed_files(spark, cfg.destination_table)
+            last_run, last_files = latest_committed_files(spark, cfg.destination_table, succeeded_runs)
             if {tuple(f) for f in present} == last_files:
                 print(f"[BRONZE] {cfg.destination_table}: source unchanged since run {last_run}; nothing to land")
                 increment = None
@@ -282,7 +303,7 @@ def ingest_table(spark: SparkSession, cfg: SourceConfig, run_id: str) -> int:
         elif cfg.ingestion_type == "FileIncremental":
             # Every row of every file not yet ingested lands: no timestamp filter, so a late file
             # whose rows are older than what bronze already holds is kept, not silently dropped.
-            new_files, total_files = files_to_ingest(spark, source_glob(cfg), cfg.destination_table)
+            new_files, total_files = files_to_ingest(spark, source_glob(cfg), cfg.destination_table, succeeded_runs)
             print(f"[BRONZE] {cfg.destination_table}: {len(new_files)} of {total_files} file(s) not yet ingested")
             increment = read_source(spark, cfg, [f["file_path"] for f in new_files]) if new_files else None
             if increment is not None:
@@ -361,10 +382,11 @@ def run_bronze_ingestion(
         raise ValueError(f"no active pipeline_config rows match source={source_name!r} table={source_table!r}")
 
     # One table failing doesn't stop the others; the run still fails at the end.
+    audit = read_audit_snapshot(spark, run_id)
     failures = []
     for cfg in configs:
         try:
-            ingest_table(spark, cfg, run_id)
+            ingest_table(spark, cfg, run_id, audit)
         except Exception as exc:
             failures.append(f"{cfg.destination_table}: {type(exc).__name__}: {exc}")
     if failures:

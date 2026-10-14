@@ -20,7 +20,6 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import LongType, StringType, StructField, StructType, TimestampType
 
 from databricks.utilities.config import META_PATH
-from databricks.utilities.logger import AUDIT_TABLE_PATH
 
 FILE_INGEST_LOG_PATH = os.path.join(META_PATH, "file_ingest_log")
 
@@ -55,38 +54,38 @@ def list_source_files(spark: SparkSession, location: str) -> DataFrame:
     )
 
 
-def committed_entries(spark: SparkSession, destination_table: str) -> DataFrame:
-    """Log entries of this table whose run succeeded: the only entries that count."""
-    if not DeltaTable.isDeltaTable(spark, FILE_INGEST_LOG_PATH) or not DeltaTable.isDeltaTable(spark, AUDIT_TABLE_PATH):
+def committed_entries(spark: SparkSession, destination_table: str, succeeded_runs: set[str]) -> DataFrame:
+    """Log entries of this table whose run succeeded: the only entries that count.
+
+    succeeded_runs is the table's successful run IDs from the audit table. The caller reads them
+    once per bronze run instead of each table querying the audit table itself.
+    """
+    if not succeeded_runs or not DeltaTable.isDeltaTable(spark, FILE_INGEST_LOG_PATH):
         return spark.createDataFrame([], FILE_INGEST_LOG_SCHEMA)
-    succeeded = (
-        spark.read.format("delta")
-        .load(AUDIT_TABLE_PATH)
-        .filter((F.col("pipeline_name") == f"bronze:{destination_table}") & (F.col("execution_status") == "SUCCESS"))
-        .select("pipeline_run_id")
-        .distinct()
-    )
     return (
         spark.read.format("delta")
         .load(FILE_INGEST_LOG_PATH)
-        .filter(F.col("destination_table") == destination_table)
-        .join(succeeded, "pipeline_run_id")
+        .filter(
+            (F.col("destination_table") == destination_table) & F.col("pipeline_run_id").isin(sorted(succeeded_runs))
+        )
     )
 
 
-def committed_files(spark: SparkSession, destination_table: str) -> DataFrame:
+def committed_files(spark: SparkSession, destination_table: str, succeeded_runs: set[str]) -> DataFrame:
     """Files this table has ingested in any run that succeeded (the FileIncremental rule)."""
-    return committed_entries(spark, destination_table).select(*FILE_IDENTITY).distinct()
+    return committed_entries(spark, destination_table, succeeded_runs).select(*FILE_IDENTITY).distinct()
 
 
-def latest_committed_files(spark: SparkSession, destination_table: str) -> tuple[str | None, set[tuple]]:
+def latest_committed_files(
+    spark: SparkSession, destination_table: str, succeeded_runs: set[str]
+) -> tuple[str | None, set[tuple]]:
     """(run ID, file identities) of the newest successful run that logged files for this table.
 
     The Full rule. A snapshot source has one current state, so "unchanged" means "the same as what
     was last landed", not "the same as anything ever landed": a file restored from a backup with
     its old size and mtime matches an older entry, and must still land.
     """
-    entries = committed_entries(spark, destination_table)
+    entries = committed_entries(spark, destination_table, succeeded_runs)
     newest = entries.orderBy(F.col("logged_at").desc()).select("pipeline_run_id").first()
     if newest is None:
         return None, set()
@@ -95,11 +94,13 @@ def latest_committed_files(spark: SparkSession, destination_table: str) -> tuple
     return run_id, {tuple(f) for f in files}
 
 
-def files_to_ingest(spark: SparkSession, location: str, destination_table: str) -> tuple[list[Row], int]:
+def files_to_ingest(
+    spark: SparkSession, location: str, destination_table: str, succeeded_runs: set[str]
+) -> tuple[list[Row], int]:
     """(files not yet ingested by this table, total files present)."""
     present = list_source_files(spark, location).cache()
     total = present.count()
-    pending = present.join(committed_files(spark, destination_table), FILE_IDENTITY, "left_anti")
+    pending = present.join(committed_files(spark, destination_table, succeeded_runs), FILE_IDENTITY, "left_anti")
     files = pending.orderBy("file_path").collect()
     present.unpersist()
     return files, total
