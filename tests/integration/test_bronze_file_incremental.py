@@ -10,7 +10,7 @@ import os
 import pytest
 from pyspark.sql import functions as F
 
-from databricks.bronze.ingest_raw_data import ingest_table
+from databricks.bronze.ingest_raw_data import ingest_table, read_audit_snapshot
 from databricks.silver.bronze_reader import current_state
 from databricks.utilities.config import BRONZE_PATH, get_spark_session
 from databricks.utilities.control import SourceConfig
@@ -148,5 +148,6 @@ def test_file_incremental_lifecycle(spark, cfg, source_dir):
         ("bundle_a.json", "run-4"),
         ("bundle_c.json", "run-5"),
     }
-    pending, total = files_to_ingest(spark, cfg.source_location, cfg.destination_table)
+    succeeded = read_audit_snapshot(spark, "unused").succeeded[f"bronze:{cfg.destination_table}"]
+    pending, total = files_to_ingest(spark, cfg.source_location, cfg.destination_table, succeeded)
     assert (pending, total) == ([], 3)
