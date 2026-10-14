@@ -105,3 +105,4 @@ Dated journal of what landed. Newest last.
 
 - `pipeline_config` is MERGEd only when the seed differs (`seed_drift`, unit-tested); runs no longer write the control table.
 - Negative result: no speed-up (A/B idle FHIR 27.1 s old vs 27.8 s new). The per-step profile had charged JVM warm-up to the first step. Measurement rule recorded: alternating A/B runs only.
+- Bronze reads the audit table once per run (`read_audit_snapshot`) instead of twice per table. A/B idle FHIR 28.9 s -> 20.4 s, same files read.
